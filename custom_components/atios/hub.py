@@ -159,6 +159,11 @@ class AtiosHub:
         self._input_ws_warned = False
         self._lease_warned = False
         self._builtin_input_cbs: list[Callable[[int, int], None]] = []
+        # One DALI request at a time: the device answers /api/dali/iface in its
+        # single web server task, and a query blocks that task until the bus is
+        # idle and the answer is in. Parallel requests (all lights polled at
+        # once, a scene) only queue up there and run into the HTTP timeout.
+        self._dali_lock = asyncio.Lock()
         self._closing = False
         self._ws_warned = False
         self._monitor_cbs: list[Callable[[MonitorFrame], None]] = []
@@ -510,10 +515,15 @@ class AtiosHub:
     # ---- sending / querying (HTTP, confirmed) -----------------------------
 
     async def send_frame(self, frame: Frame) -> list[int] | None:
-        """Send a DALI frame over the confirmed HTTP endpoint.
+        """Send a DALI frame over the confirmed HTTP endpoint, one request at a time.
 
         Returns the answer byte(s) as list[int] for QUERY frames, else None.
+        The HTTP timeout starts once it is this frame's turn.
         """
+        async with self._dali_lock:
+            return await self._send_frame_now(frame)
+
+    async def _send_frame_now(self, frame: Frame) -> list[int] | None:
         payload = {
             "repeat_twice": frame.send_twice,
             "wait_response": frame.wait_for_answer,

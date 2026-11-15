@@ -33,6 +33,11 @@ from .dali import (
 )
 from .hub import AtiosHub
 
+# Update and control the lights one at a time. Every poll is a QUERY ACTUAL
+# LEVEL that the SmartCore answers in its single web server task; the hub
+# serialises the DALI requests anyway, this keeps HA from starting them all.
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

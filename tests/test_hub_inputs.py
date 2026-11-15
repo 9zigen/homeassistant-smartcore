@@ -5,11 +5,7 @@ Run: pytest tests/
 """
 
 import asyncio
-import importlib.util
 import json
-import sys
-import types
-from pathlib import Path
 
 import pytest
 
@@ -20,16 +16,9 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
-_ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "atios"
+from _hub_loader import load_hub  # noqa: E402
 
-# Load hub.py with its relative imports, without the package __init__ (needs Home Assistant)
-_package = types.ModuleType("atios_pkg")
-_package.__path__ = [str(_ROOT)]
-sys.modules["atios_pkg"] = _package
-_spec = importlib.util.spec_from_file_location("atios_pkg.hub", _ROOT / "hub.py")
-hub_module = importlib.util.module_from_spec(_spec)
-sys.modules["atios_pkg.hub"] = hub_module
-_spec.loader.exec_module(hub_module)
+hub_module = load_hub()
 
 
 class FakeSmartCore:
