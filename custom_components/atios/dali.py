@@ -291,3 +291,31 @@ def decode_input_event(data: list[int], bits: int) -> InputEvent | None:
     return InputEvent(
         list(data), EventScheme.DEVICE, short_address, field, None, event_info
     )
+
+
+# ---- DALI-2 quiescent mode (IEC 62386-103) ---------------------------------
+# The SmartCore web UI wraps every bus scan in START / STOP QUIESCENT MODE,
+# broadcast to the device (instance byte 0xFE), so input devices stay silent.
+# Other masters (DALI Cockpit) do the same. A device leaves quiescent mode on
+# its own 15 minutes after the last START.
+
+OP_DA24_START_QUIESCENT_MODE = 0x1D
+OP_DA24_STOP_QUIESCENT_MODE = 0x1E
+QUIESCENT_MODE_TIMEOUT_S = 15 * 60
+
+_DA24_BROADCAST_COMMAND = 0xFF  # broadcast address, bit16 set: a command, not an event
+_DA24_INSTANCE_DEVICE = 0xFE
+
+
+def decode_quiescent_command(data: list[int], bits: int) -> bool | None:
+    """True for a broadcast START QUIESCENT MODE frame, False for STOP, None for anything else."""
+    if bits != 24 or len(data) < 3:
+        return None
+    if (data[0] & 0xFF) != _DA24_BROADCAST_COMMAND or (data[1] & 0xFF) != _DA24_INSTANCE_DEVICE:
+        return None
+    opcode = data[2] & 0xFF
+    if opcode == OP_DA24_START_QUIESCENT_MODE:
+        return True
+    if opcode == OP_DA24_STOP_QUIESCENT_MODE:
+        return False
+    return None

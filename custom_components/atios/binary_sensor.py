@@ -1,4 +1,8 @@
-"""Binary sensor platform: DALI-2 occupancy sensors and built-in inputs.
+"""Binary sensor platform: DALI-2 occupancy sensors, built-in inputs and the bus scan.
+
+The diagnostic "DALI bus scan" sensor is on while a scan holds the DALI-2
+devices in quiescent mode (see AtiosHub.bus_scan_active); DALI requests from
+Home Assistant are paused meanwhile.
 
 Built-in inputs (the SmartCore's 12 input terminals) come from the input
 monitor of newer firmware (see inputs.py). An input appears as an entity the
@@ -27,6 +31,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
@@ -49,6 +54,7 @@ async def async_setup_entry(
 ) -> None:
     hub = entry.runtime_data
     _setup_builtin_inputs(hass, entry, async_add_entities)
+    async_add_entities([AtiosBusScan(entry)])
 
     entities: list[AtiosOccupancySensor] = []
     by_signature: dict[str, AtiosOccupancySensor] = {}
@@ -161,3 +167,29 @@ class AtiosBuiltinInput(BinarySensorEntity):
         self._attr_is_on = level == 1
         if self.hass is not None:
             self.async_write_ha_state()
+
+
+class AtiosBusScan(BinarySensorEntity):
+    """On while a DALI bus scan runs (quiescent mode), DALI requests are paused meanwhile."""
+
+    _attr_has_entity_name = True
+    _attr_name = "DALI bus scan"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+
+    def __init__(self, entry: AtiosConfigEntry) -> None:
+        self._hub = entry.runtime_data
+        self._attr_unique_id = f"{entry.unique_id}_bus_scan"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.unique_id)})
+
+    @property
+    def is_on(self) -> bool:
+        return self._hub.bus_scan_active
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._hub.add_bus_scan_listener(self._on_bus_scan))
+
+    @callback
+    def _on_bus_scan(self, _active: bool) -> None:
+        self.async_write_ha_state()

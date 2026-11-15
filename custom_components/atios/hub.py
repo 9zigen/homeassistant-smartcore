@@ -55,8 +55,15 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from .const import LUNATONE_GREETING_TIMEOUT_S, RECONNECT_MAX, RECONNECT_MIN
-from .dali import Frame
+from .const import (
+    LUNATONE_ECHO_CHECK_S,
+    LUNATONE_ECHO_TIMEOUT_S,
+    LUNATONE_GREETING_TIMEOUT_S,
+    RECONNECT_MAX,
+    RECONNECT_MIN,
+    UNAVAILABLE_AFTER_FAILURES,
+)
+from .dali import QUIESCENT_MODE_TIMEOUT_S, Frame, decode_quiescent_command
 from .inputs import CMD_INPUT_MONITOR_START, LEASE_RENEW_S, parse_builtin_input
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,6 +82,10 @@ class MonitorFrame:
     bits: int
     line: int | None = None
     framing_error: bool = False
+    # Device clock (seconds since boot) when the frame was received, and the
+    # socket's message counter (consecutive per connection, a gap means lost messages)
+    device_timestamp: float | None = None
+    counter: int | None = None
 
 
 def _parse_ws_json(raw: str) -> dict | None:
@@ -123,11 +134,16 @@ def _monitor_frame(msg: dict) -> MonitorFrame | None:
     except (TypeError, ValueError):
         return None
     bits = data.get("bits")
+    timestamp = data.get("timestamp")
+    signature = msg.get("timeSignature")
+    counter = signature.get("counter") if isinstance(signature, dict) else None
     return MonitorFrame(
         data=octets,
         bits=int(bits) if isinstance(bits, int) else len(octets) * 8,
         line=data.get("line"),
         framing_error=bool(data.get("framingError")),
+        device_timestamp=float(timestamp) if isinstance(timestamp, (int, float)) else None,
+        counter=counter if isinstance(counter, int) else None,
     )
 
 
@@ -172,6 +188,18 @@ class AtiosHub:
         self._greeted = False  # Lunatone JSON seen on the current connection
         self._stream_ok: bool | None = None
         self._stream_cbs: list[Callable[[bool], None]] = []
+        # Stream that died after the greeting, see const.LUNATONE_ECHO_TIMEOUT_S
+        self._echo_pending_since: float | None = None
+        self._stream_lost = False
+        self._stream_lost_cbs: list[Callable[[bool], None]] = []
+        self._monitor_backoff = RECONNECT_MIN
+        # Consecutive DALI requests that did not reach the device
+        self._send_failures = 0
+        self._available_cbs: list[Callable[[bool], None]] = []
+        # Bus scan: quiescent mode seen on the bus, DALI requests paused meanwhile
+        self._bus_scan = False
+        self._bus_scan_cbs: list[Callable[[bool], None]] = []
+        self._bus_scan_expiry: asyncio.TimerHandle | None = None
         self._info: dict = {}
         self.control_devices: list = []  # nvram.ControlDevice, set at setup
         self.input_devices: list = []  # nvram.InputDevice, set at setup
@@ -336,6 +364,9 @@ class AtiosHub:
         # The input monitor lease is not released: the web UI may hold it too,
         # and the firmware ends it by itself once nobody renews it.
         self._closing = True
+        if self._bus_scan_expiry is not None:
+            self._bus_scan_expiry.cancel()
+            self._bus_scan_expiry = None
         for task in (self._task, self._input_task):
             if task:
                 task.cancel()
@@ -356,6 +387,75 @@ class AtiosHub:
         self._ip_interface_cbs.append(cb)
         return lambda: self._ip_interface_cbs.remove(cb)
 
+    @property
+    def available(self) -> bool:
+        """False once UNAVAILABLE_AFTER_FAILURES DALI requests in a row failed to reach it."""
+        return self._send_failures < UNAVAILABLE_AFTER_FAILURES
+
+    def add_available_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
+        """Call ``cb(available)`` when the device stops or starts answering DALI requests."""
+        self._available_cbs.append(cb)
+        return lambda: self._available_cbs.remove(cb)
+
+    def _record_send(self, reached: bool) -> None:
+        was_available = self.available
+        self._send_failures = 0 if reached else self._send_failures + 1
+        if self.available != was_available:
+            _notify(self._available_cbs, self.available)
+
+    @property
+    def bus_scan_active(self) -> bool:
+        """True while a bus scan holds the DALI-2 devices in quiescent mode.
+
+        Seen from the START / STOP QUIESCENT MODE broadcast on the Lunatone
+        stream (the SmartCore's own frames included), so it needs the "DALI IP
+        Interface". DALI requests from Home Assistant are paused meanwhile, so
+        they do not disturb addressing and do not read half-commissioned gear.
+        """
+        return self._bus_scan
+
+    def add_bus_scan_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
+        """Call ``cb(active)`` when a bus scan starts or ends."""
+        self._bus_scan_cbs.append(cb)
+        return lambda: self._bus_scan_cbs.remove(cb)
+
+    def _set_bus_scan(self, active: bool) -> None:
+        if self._bus_scan_expiry is not None:
+            self._bus_scan_expiry.cancel()
+            self._bus_scan_expiry = None
+        if active:
+            # Devices leave quiescent mode on their own 15 min after the last START,
+            # so a missed STOP (stream lost, web UI closed mid-scan) cannot pause us for good.
+            self._bus_scan_expiry = asyncio.get_running_loop().call_later(
+                QUIESCENT_MODE_TIMEOUT_S, self._set_bus_scan, False
+            )
+        if active == self._bus_scan:
+            return
+        self._bus_scan = active
+        _LOGGER.info(
+            "Atios %s: DALI bus scan %s, DALI requests %s",
+            self._host,
+            "started" if active else "ended",
+            "paused" if active else "resumed",
+        )
+        _notify(self._bus_scan_cbs, active)
+
+    @property
+    def stream_lost(self) -> bool:
+        """True while the Lunatone stream is considered dead after it had greeted us."""
+        return self._stream_lost
+
+    def add_stream_lost_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
+        """Call ``cb(lost)`` when the Lunatone stream dies after the greeting, or comes back."""
+        self._stream_lost_cbs.append(cb)
+        return lambda: self._stream_lost_cbs.remove(cb)
+
+    def _set_stream_lost(self, lost: bool) -> None:
+        if lost == self._stream_lost:
+            return
+        self._stream_lost = lost
+        _notify(self._stream_lost_cbs, lost)
+
     def add_stream_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
         """Call ``cb(ok)`` when the Lunatone socket starts or stops talking to us."""
         self._stream_cbs.append(cb)
@@ -364,9 +464,10 @@ class AtiosHub:
     # ---- monitor websocket (receive-only, best-effort) --------------------
 
     async def _run_monitor(self) -> None:
-        backoff = RECONNECT_MIN
+        self._monitor_backoff = RECONNECT_MIN
         while not self._closing:
             watchdog: asyncio.Task | None = None
+            echo_watchdog: asyncio.Task | None = None
             try:
                 # heartbeat: ws-level PING, answered by the device's HTTP
                 # server itself. Nothing else needs sending: the daliMonitor
@@ -375,10 +476,11 @@ class AtiosHub:
                     self._ws_url, heartbeat=30, timeout=aiohttp.ClientTimeout(total=10)
                 ) as ws:
                     self._ws_warned = False
-                    backoff = RECONNECT_MIN
                     _LOGGER.info("Atios %s: monitor websocket connected", self._host)
                     self._greeted = False
+                    self._echo_pending_since = None
                     watchdog = asyncio.create_task(self._greeting_watchdog())
+                    echo_watchdog = asyncio.create_task(self._echo_watchdog(ws))
                     # Re-check on every connect, so a setting changed while we
                     # were away is picked up.
                     await self.async_fetch_settings()
@@ -405,11 +507,35 @@ class AtiosHub:
                 else:
                     _LOGGER.debug("Atios %s: ws retry (%s)", self._host, err)
             finally:
-                if watchdog is not None:
-                    watchdog.cancel()
+                for task in (watchdog, echo_watchdog):
+                    if task is not None:
+                        task.cancel()
             if not self._closing:
-                await asyncio.sleep(backoff)
-                backoff = min(RECONNECT_MAX, backoff * 2)
+                # Reset to RECONNECT_MIN once bus frames flow (_handle_ws_text), so
+                # a socket that greets but stays dead is retried ever more slowly.
+                await asyncio.sleep(self._monitor_backoff)
+                self._monitor_backoff = min(RECONNECT_MAX, self._monitor_backoff * 2)
+
+    async def _echo_watchdog(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Reconnect when a query was answered but its echo never arrived."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(LUNATONE_ECHO_CHECK_S)
+            pending = self._echo_pending_since
+            if (
+                pending is None
+                or self._ip_interface is not True
+                or loop.time() - pending < LUNATONE_ECHO_TIMEOUT_S
+            ):
+                continue
+            _LOGGER.warning(
+                "Atios %s: the DALI IP websocket stopped streaming bus frames, reconnecting",
+                self._host,
+            )
+            self._set_stream_lost(True)
+            self._echo_pending_since = None
+            await ws.close()
+            return
 
     async def _greeting_watchdog(self) -> None:
         """Flag a connection on which the device never says anything."""
@@ -436,6 +562,11 @@ class AtiosHub:
         # The device sends no daliMonitor at all while "DALI IP Interface" is
         # off, so any one of them (ours included) proves it is on now.
         self._set_ip_interface(True)
+        # ...and that the stream is alive, echoes of our own frames included
+        self._echo_pending_since = None
+        self._monitor_backoff = RECONNECT_MIN
+        self._set_stream_lost(False)
+        self._track_bus_scan(msg)
         frame = _monitor_frame(msg)
         if frame is None:
             return
@@ -444,6 +575,20 @@ class AtiosHub:
                 cb(frame)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Atios monitor listener failed")
+
+    def _track_bus_scan(self, msg: dict) -> None:
+        """Follow quiescent mode from any daliMonitor frame, the SmartCore's own included."""
+        data = msg.get("data")
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, list) or not isinstance(data.get("bits"), int):
+            return
+        try:
+            octets = [int(b) & 0xFF for b in payload]
+        except (TypeError, ValueError):
+            return
+        quiescent = decode_quiescent_command(octets, data["bits"])
+        if quiescent is not None:
+            self._set_bus_scan(quiescent)
 
     # ---- input monitor on the web UI socket (best-effort) -----------------
 
@@ -521,6 +666,11 @@ class AtiosHub:
         The HTTP timeout starts once it is this frame's turn.
         """
         async with self._dali_lock:
+            # Checked after waiting for the lock: a scan may have started meanwhile.
+            # Quiescent mode frames still go out, so a stuck scan can be ended.
+            if self._bus_scan and decode_quiescent_command(frame.data, frame.bits) is None:
+                _LOGGER.debug("Atios %s: bus scan running, %s not sent", self._host, frame.data)
+                return None
             return await self._send_frame_now(frame)
 
     async def _send_frame_now(self, frame: Frame) -> list[int] | None:
@@ -531,11 +681,14 @@ class AtiosHub:
             "data": list(frame.data),
         }
         url = f"{self._base_url}/api/dali/iface"
+        reached = False
         try:
             async with self._session.post(
                 url, json=payload, timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
                 resp.raise_for_status()
+                reached = True
+                self._record_send(True)
                 if not frame.wait_for_answer:
                     return None
                 body = await resp.json(content_type=None)
@@ -544,16 +697,30 @@ class AtiosHub:
                     return None
                 if body.get("collision_detected"):
                     _LOGGER.debug("Atios %s: DALI collision on %s", self._host, frame.data)
+                # Without an answer the firmware still reports "data": 0, which
+                # would read as a real answer (level 0, light off).
+                if not body.get("success"):
+                    return None
                 answer = body.get("data")
                 if answer is None:
                     return None
+                # An answered query was transmitted, so its echo must arrive
+                # on the Lunatone socket (see _echo_watchdog).
+                if self._echo_pending_since is None:
+                    self._echo_pending_since = asyncio.get_running_loop().time()
                 if isinstance(answer, int):
                     return [answer]
                 if isinstance(answer, list):
                     return answer
                 return None
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Atios %s: HTTP send failed: %s", self._host, err)
+            if reached:
+                _LOGGER.debug("Atios %s: unexpected DALI answer: %s", self._host, err)
+                return None
+            # Log the start of an outage, not every request while it lasts
+            log = _LOGGER.error if self._send_failures == 0 else _LOGGER.debug
+            log("Atios %s: HTTP send failed: %s", self._host, err)
+            self._record_send(False)
             return None
 
     async def async_test_connection(self) -> bool:

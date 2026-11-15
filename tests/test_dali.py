@@ -90,6 +90,17 @@ def test_24bit_command_is_not_event():
     assert dali.decode_input_event([6, 4, 1], 24).gesture == "button_pressed"
 
 
+
+def test_quiescent_mode_frames():
+    assert dali.decode_quiescent_command([0xFF, 0xFE, 0x1D], 24) is True
+    assert dali.decode_quiescent_command([0xFF, 0xFE, 0x1E], 24) is False
+    # other device commands, addressed quiescent mode, events and other lengths
+    assert dali.decode_quiescent_command([0xFF, 0xFE, 0x20], 24) is None
+    assert dali.decode_quiescent_command([0x07, 0xFE, 0x1D], 24) is None
+    assert dali.decode_quiescent_command([0xFE, 0xFE, 0x1D], 24) is None  # bit16 clear: an event
+    assert dali.decode_quiescent_command([0xFF, 0x00, 0x1D], 24) is None
+    assert dali.decode_quiescent_command([0xFF, 0x1D], 16) is None
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
