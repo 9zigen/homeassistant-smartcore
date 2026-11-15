@@ -101,6 +101,36 @@ def test_quiescent_mode_frames():
     assert dali.decode_quiescent_command([0xFF, 0x00, 0x1D], 24) is None
     assert dali.decode_quiescent_command([0xFF, 0x1D], 16) is None
 
+
+def test_standard_rotary_encoder_events():
+    R = dali.Rotation
+    assert dali.decode_rotation(0x00) == R("right")
+    assert dali.decode_rotation(0x01) == R("left")
+    assert dali.decode_rotation(0x02) == R("stop")
+    assert dali.decode_rotation(0x31) == R("left")  # low nibble only, like the firmware
+    assert dali.decode_rotation(0x05) is None
+
+
+def test_speed_encoder_events():
+    R = dali.Rotation
+    assert dali.decode_rotation(3, speed_encoder=True) == R("right", "slow")
+    assert dali.decode_rotation(2, speed_encoder=True) == R("right", "medium")
+    assert dali.decode_rotation(1, speed_encoder=True) == R("right", "fast")
+    assert dali.decode_rotation(6, speed_encoder=True) == R("left", "slow")
+    assert dali.decode_rotation(5, speed_encoder=True) == R("left", "medium")
+    assert dali.decode_rotation(4, speed_encoder=True) == R("left", "fast")
+    assert dali.decode_rotation(0, speed_encoder=True) is None
+    assert dali.decode_rotation(7, speed_encoder=True) is None
+
+
+def test_absolute_position_percent():
+    assert dali.position_percent(0) == 0
+    assert dali.position_percent(512) == 50
+    assert dali.position_percent(1023) == 100
+    assert dali.position_percent(128, right_aligned=True) == 50
+    assert dali.position_percent(255, right_aligned=True) == 100
+    assert dali.position_percent(900, right_aligned=True) == 100  # clamped like the firmware
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

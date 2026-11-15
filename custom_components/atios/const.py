@@ -77,3 +77,5 @@ DOUBLE_PRESS_GAP_S = 0.4  # max gap between a release and the next press to coun
 # A long press ends after this hold time even without its release: a lost
 # button_released would otherwise repeat long_press_repeat until the next press.
 LONG_PRESS_MAX_S = 10
+# Speed encoders send no stop event: rotate_stop follows this long after the last step
+ENCODER_SPEED_STOP_S = 1.0

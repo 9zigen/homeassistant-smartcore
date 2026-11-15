@@ -100,3 +100,43 @@ def test_expected_signature_device_scheme():
     inst = input_devices()[3].instances[0]
     assert inst.event_scheme == 1
     assert inst.expected_signature(4) == "a4_t3_ix"
+
+
+def test_gtin_and_encoder_model():
+    # Input 2 is a Gira 202700: instance 1 relative, 2 rotation speed, 3 absolute
+    gira = input_devices()[1]
+    assert gira.gtin == 4010337129592
+    by_number = {inst.number: inst for inst in gira.instances}
+    assert gira.is_speed_encoder(by_number[2]) is True
+    assert gira.is_speed_encoder(by_number[1]) is False
+    assert gira.sends_right_aligned_positions(by_number[3]) is True
+
+    other = input_devices()[2]
+    assert other.gtin is not None
+    assert other.is_speed_encoder(other.instances[0]) is False
+    assert other.sends_right_aligned_positions(other.instances[0]) is False
+
+
+def test_stored_position_alignment_wins_over_the_model_table():
+    raw = {
+        "address": 9,
+        "gtin": [3, 165, 186, 184, 84, 120],
+        "instances": [
+            {
+                "number": 3,
+                "type": 2,
+                "active": True,
+                "resolution": 8,
+                "position_right_aligned": False,
+            }
+        ],
+    }
+    device = parse_input_devices([raw])[0]
+    assert device.instances[0].resolution == 8
+    assert device.sends_right_aligned_positions(device.instances[0]) is False
+
+
+def test_missing_or_broken_gtin():
+    for gtin in (None, [], "x", [0, 0, 0]):
+        device = parse_input_devices([{"address": 2, "gtin": gtin, "instances": []}])[0]
+        assert device.gtin is None
