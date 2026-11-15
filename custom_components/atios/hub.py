@@ -5,7 +5,7 @@ Transport is native aiohttp — no external DALI library. The SmartCore exposes:
   * a confirmed HTTP endpoint ``POST /api/dali/iface`` that sends a raw DALI
     frame and (with ``wait_response``) returns the answer as
     ``{"success":true,"bus_busy":false,"collision_detected":false,"data":<byte>}``;
-  * an emulated Lunatone DALI-2 IoT websocket at ``ws://<host>/`` that streams
+  * the DALI IP Interface websocket at ``ws://<host>/`` that streams
     ``daliMonitor`` frames (bus traffic, incl. DALI-2 input/button events).
     Confirmed on fw 2.7.9: on connect it greets with ``{"type":"info"}``
     reporting name "dali-iot", protocolVersion 3.0.
@@ -28,18 +28,18 @@ firmware source, lib-dali ``dali_transport_layer.c`` / ``dali_ip_websocket.c``):
     A text "ping" is not understood on ``/`` either — the device just logs a
     JSON parse error — so keepalive is left to the ws-level heartbeat.
   * The socket serves ONE client: the firmware keeps a single global fd and the
-    most recent handshake takes the stream over. Another Lunatone client on
+    most recent handshake takes the stream over. Another DALI IP Interface client on
     ``/`` (tools/monitor.py, a second HA, DALI Cockpit) silences us without
     closing our socket, and we stay silent after it leaves until we reconnect.
   * Every client is greeted with ``{"type":"info"}`` right after the
     handshake. Firmware built on ESP-IDF v5.5.5/v6.0.1+ (seen on 3.2.2) never runs the
     handler's handshake branch, so it registers no client and silently drops
-    the greeting and everything after it. We watch for any Lunatone JSON after
+    the greeting and everything after it. We watch for any DALI IP Interface JSON after
     connecting and report its absence via add_stream_listener.
 
 A second socket, the web UI's ``ws://<host>/ws``, carries the input monitor of
 newer firmware (see inputs.py). Only its built-in input edges are used, reported
-through add_builtin_input_listener: the Lunatone socket stays the one transport
+through add_builtin_input_listener: the DALI IP Interface socket stays the one transport
 for DALI, so the input monitor's DALI-2 events are ignored. Firmware without the
 input monitor ignores the lease command and sends nothing on this socket.
 """
@@ -56,9 +56,9 @@ from dataclasses import dataclass
 import aiohttp
 
 from .const import (
-    LUNATONE_ECHO_CHECK_S,
-    LUNATONE_ECHO_TIMEOUT_S,
-    LUNATONE_GREETING_TIMEOUT_S,
+    DALI_IP_ECHO_CHECK_S,
+    DALI_IP_ECHO_TIMEOUT_S,
+    DALI_IP_GREETING_TIMEOUT_S,
     RECONNECT_MAX,
     RECONNECT_MIN,
     UNAVAILABLE_AFTER_FAILURES,
@@ -68,10 +68,10 @@ from .inputs import CMD_INPUT_MONITOR_START, LEASE_RENEW_S, parse_builtin_input
 
 _LOGGER = logging.getLogger(__name__)
 
-# Message types the Lunatone socket sends. The web UI's own JSON notifications
+# Message types the DALI IP Interface socket sends. The web UI's own JSON notifications
 # (ota_status, system_event, ...) are broadcast to every ws client, this one
 # included, but carry no "type", so they don't count as the device talking.
-_LUNATONE_TYPES = frozenset({"info", "daliMonitor", "daliFrame", "daliAnswer"})
+_DALI_IP_TYPES = frozenset({"info", "daliMonitor", "daliFrame", "daliAnswer"})
 
 
 @dataclass
@@ -91,7 +91,7 @@ class MonitorFrame:
 def _parse_ws_json(raw: str) -> dict | None:
     """Decode one ws text message as a JSON object, or None if it isn't one.
 
-    Besides Lunatone-protocol JSON the socket carries the web UI's plain-text
+    Besides DALI IP Interface JSON the socket carries the web UI's plain-text
     bus monitor (``DALI:[IN],DA24 Evt,008001,NA``) whenever someone has started
     the DALI Monitor in the web UI. Those lines repeat frames we already get as
     daliMonitor JSON, so they are dropped here — parsing both would deliver
@@ -161,7 +161,7 @@ class AtiosHub:
     def __init__(self, host: str, line: int, session: aiohttp.ClientSession) -> None:
         self._base_url = host if host.startswith("http") else f"http://{host}"
         self._host = self._base_url.removeprefix("http://").removeprefix("https://")
-        # Lunatone-emulation ws lives at the root path (confirmed fw 2.7.9 and
+        # The DALI IP Interface websocket lives at the root path (confirmed fw 2.7.9 and
         # firmware source). /ws also accepts a ws, but that is the web UI's
         # socket and only carries the plain-text monitor, never daliMonitor.
         self._ws_url = f"ws://{self._host}/"
@@ -185,10 +185,10 @@ class AtiosHub:
         self._monitor_cbs: list[Callable[[MonitorFrame], None]] = []
         self._ip_interface: bool | None = None
         self._ip_interface_cbs: list[Callable[[bool], None]] = []
-        self._greeted = False  # Lunatone JSON seen on the current connection
+        self._greeted = False  # DALI IP Interface JSON seen on the current connection
         self._stream_ok: bool | None = None
         self._stream_cbs: list[Callable[[bool], None]] = []
-        # Stream that died after the greeting, see const.LUNATONE_ECHO_TIMEOUT_S
+        # Stream that died after the greeting, see const.DALI_IP_ECHO_TIMEOUT_S
         self._echo_pending_since: float | None = None
         self._stream_lost = False
         self._stream_lost_cbs: list[Callable[[bool], None]] = []
@@ -263,7 +263,7 @@ class AtiosHub:
 
     @property
     def stream_ok(self) -> bool | None:
-        """Whether the Lunatone socket talks to us; None until it is known."""
+        """Whether the DALI IP Interface socket talks to us; None until it is known."""
         return self._stream_ok
 
     def _set_stream_ok(self, ok: bool) -> None:
@@ -407,9 +407,9 @@ class AtiosHub:
     def bus_scan_active(self) -> bool:
         """True while a bus scan holds the DALI-2 devices in quiescent mode.
 
-        Seen from the START / STOP QUIESCENT MODE broadcast on the Lunatone
-        stream (the SmartCore's own frames included), so it needs the "DALI IP
-        Interface". DALI requests from Home Assistant are paused meanwhile, so
+        Seen from the START / STOP QUIESCENT MODE broadcast on the DALI IP
+        Interface stream (the SmartCore's own frames included), so it needs that
+        setting on. DALI requests from Home Assistant are paused meanwhile, so
         they do not disturb addressing and do not read half-commissioned gear.
         """
         return self._bus_scan
@@ -442,11 +442,11 @@ class AtiosHub:
 
     @property
     def stream_lost(self) -> bool:
-        """True while the Lunatone stream is considered dead after it had greeted us."""
+        """True while the DALI IP Interface stream is considered dead after it had greeted us."""
         return self._stream_lost
 
     def add_stream_lost_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
-        """Call ``cb(lost)`` when the Lunatone stream dies after the greeting, or comes back."""
+        """Call ``cb(lost)`` when the DALI IP Interface stream dies or recovers."""
         self._stream_lost_cbs.append(cb)
         return lambda: self._stream_lost_cbs.remove(cb)
 
@@ -457,7 +457,7 @@ class AtiosHub:
         _notify(self._stream_lost_cbs, lost)
 
     def add_stream_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
-        """Call ``cb(ok)`` when the Lunatone socket starts or stops talking to us."""
+        """Call ``cb(ok)`` when the DALI IP Interface socket starts or stops talking to us."""
         self._stream_cbs.append(cb)
         return lambda: self._stream_cbs.remove(cb)
 
@@ -520,12 +520,12 @@ class AtiosHub:
         """Reconnect when a query was answered but its echo never arrived."""
         loop = asyncio.get_running_loop()
         while True:
-            await asyncio.sleep(LUNATONE_ECHO_CHECK_S)
+            await asyncio.sleep(DALI_IP_ECHO_CHECK_S)
             pending = self._echo_pending_since
             if (
                 pending is None
                 or self._ip_interface is not True
-                or loop.time() - pending < LUNATONE_ECHO_TIMEOUT_S
+                or loop.time() - pending < DALI_IP_ECHO_TIMEOUT_S
             ):
                 continue
             _LOGGER.warning(
@@ -539,21 +539,21 @@ class AtiosHub:
 
     async def _greeting_watchdog(self) -> None:
         """Flag a connection on which the device never says anything."""
-        await asyncio.sleep(LUNATONE_GREETING_TIMEOUT_S)
+        await asyncio.sleep(DALI_IP_GREETING_TIMEOUT_S)
         if not self._greeted:
             self._set_stream_ok(False)
 
     def _handle_ws_text(self, raw: str) -> None:
         """Parse a ws text message and dispatch monitor frames.
 
-        Only Lunatone-protocol JSON is used (see _parse_ws_json); the web UI's
+        Only DALI IP Interface JSON is used (see _parse_ws_json); the web UI's
         ``DALI:...`` text mirror of the same frames is ignored so each bus
         event is delivered exactly once.
         """
         msg = _parse_ws_json(raw)
-        if msg is None or msg.get("type") not in _LUNATONE_TYPES:
+        if msg is None or msg.get("type") not in _DALI_IP_TYPES:
             return
-        # Any Lunatone message (the "info" greeting first) shows the device has
+        # Any DALI IP Interface message (the "info" greeting first) shows the device has
         # registered us as its client and will stream to us.
         self._greeted = True
         self._set_stream_ok(True)
@@ -705,7 +705,7 @@ class AtiosHub:
                 if answer is None:
                     return None
                 # An answered query was transmitted, so its echo must arrive
-                # on the Lunatone socket (see _echo_watchdog).
+                # on the DALI IP Interface socket (see _echo_watchdog).
                 if self._echo_pending_since is None:
                     self._echo_pending_since = asyncio.get_running_loop().time()
                 if isinstance(answer, int):

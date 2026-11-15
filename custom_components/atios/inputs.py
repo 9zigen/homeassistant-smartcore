@@ -16,8 +16,8 @@ firmware keeps the command endpoint behind the web password, like
     edge, however many accessories use the input. There is no snapshot: an
     input is unknown until it changes for the first time.
   * ``DALI2:<address>,<instance>,<event_info>`` — DALI-2 instance events, for the
-    web UI. Ignored here: the Lunatone socket stays the one transport for DALI,
-    and it carries every event scheme, not only Device/Instance.
+    web UI. Ignored here: the DALI IP Interface socket stays the one transport
+    for DALI, and it carries every event scheme, not only Device/Instance.
 """
 
 from __future__ import annotations

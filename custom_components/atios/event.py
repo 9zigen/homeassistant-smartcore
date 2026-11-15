@@ -43,6 +43,7 @@ from . import AtiosConfigEntry
 from .const import (
     DOMAIN,
     DOUBLE_PRESS_GAP_S,
+    ENCODER_SPEED_STOP_S,
     EVENT_DALI,
     LONG_PRESS_MAX_S,
     LONG_PRESS_REPEAT_S,
@@ -51,9 +52,10 @@ from .const import (
 from .dali import (
     PUSHBUTTON_EVENTS,
     decode_input_event,
+    decode_rotation,
 )
 from .hub import MonitorFrame
-from .nvram import INSTANCE_PUSHBUTTON
+from .nvram import INSTANCE_GENERIC, INSTANCE_PUSHBUTTON
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +89,44 @@ async def async_setup_entry(
         async_add_entities(precreated)
 
     entry.async_on_unload(hub.add_monitor_listener(manager.on_monitor))
+    _setup_encoders(hass, entry, async_add_entities)
+
+
+def _setup_encoders(
+    hass: HomeAssistant, entry: AtiosConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """One event entity per active relative encoder instance of the NVRAM model."""
+    hub = entry.runtime_data
+    encoders: dict[str, AtiosEncoderEvent] = {}
+    for dev in hub.input_devices:
+        for inst in dev.instances:
+            if inst.type != INSTANCE_GENERIC or not inst.active:
+                continue
+            sig = inst.expected_signature(dev.address)
+            if sig is None or sig in encoders:
+                continue
+            encoders[sig] = AtiosEncoderEvent(
+                entry,
+                signature=sig,
+                label=f"{dev.name} encoder {inst.number}",
+                speed_encoder=dev.is_speed_encoder(inst),
+            )
+    if not encoders:
+        return
+    async_add_entities(list(encoders.values()))
+
+    @callback
+    def on_monitor(event: MonitorFrame) -> None:
+        if getattr(event, "framing_error", False):
+            return
+        decoded = decode_input_event(list(event.data), event.bits)
+        if decoded is None or decoded.event_info is None:
+            return
+        entity = encoders.get(decoded.signature)
+        if entity is not None:
+            entity.handle_event_info(decoded.event_info)
+
+    entry.async_on_unload(hub.add_monitor_listener(on_monitor))
 
 
 class _PressPhase(Enum):
@@ -310,4 +350,57 @@ class AtiosButtonEvent(EventEntity):
             self._pending = (gesture, payload)
             return
         self._trigger_event(gesture, payload)
+        self.async_write_ha_state()
+
+
+ENCODER_EVENT_TYPES = ["rotate_left", "rotate_right", "rotate_stop"]
+
+
+class AtiosEncoderEvent(EventEntity):
+    """One DALI-2 rotary encoder (relative instance) from the NVRAM model.
+
+    Standard encoders send rotation start right / left and a stop. Speed
+    encoders (Gira 202700 / Feller 40095 instance 2) send one event per step
+    with its speed and no stop, so rotate_stop follows ENCODER_SPEED_STOP_S
+    after the last step.
+    """
+
+    _attr_has_entity_name = True
+    _attr_event_types = ENCODER_EVENT_TYPES
+    _attr_should_poll = False
+
+    def __init__(
+        self, entry: AtiosConfigEntry, *, signature: str, label: str, speed_encoder: bool
+    ) -> None:
+        self._speed_encoder = speed_encoder
+        self._attr_name = label
+        self._attr_unique_id = f"{entry.unique_id}_enc_{signature}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.unique_id)})
+        self._cancel_stop: Callable[[], None] | None = None
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._cancel_pending_stop()
+
+    def _cancel_pending_stop(self) -> None:
+        if self._cancel_stop is not None:
+            self._cancel_stop()
+            self._cancel_stop = None
+
+    @callback
+    def handle_event_info(self, event_info: int) -> None:
+        rotation = decode_rotation(event_info, self._speed_encoder)
+        if rotation is None or self.hass is None:
+            return
+        self._cancel_pending_stop()
+        attributes = {"event_info": event_info}
+        if rotation.speed is not None:
+            attributes["speed"] = rotation.speed
+            self._cancel_stop = async_call_later(self.hass, ENCODER_SPEED_STOP_S, self._speed_stop)
+        self._trigger_event(f"rotate_{rotation.direction}", attributes)
+        self.async_write_ha_state()
+
+    @callback
+    def _speed_stop(self, _now: object) -> None:
+        self._cancel_stop = None
+        self._trigger_event("rotate_stop")
         self.async_write_ha_state()

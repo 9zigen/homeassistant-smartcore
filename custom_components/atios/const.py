@@ -44,22 +44,25 @@ RECONNECT_MAX = 60
 # sent while that setting is on; it is off by default.
 ISSUE_DALI_IP_DISABLED = "dali_ip_interface_disabled"
 
-# The Lunatone socket greets every client with {"type":"info"} right after the
-# handshake, whatever the settings. No Lunatone JSON within this many seconds
-# means the device will not stream on this socket at all: SmartCore firmware
+# The DALI IP Interface socket greets every client with {"type":"info"} right
+# after the handshake, whatever the settings. No DALI IP Interface JSON within
+# this many seconds means the device will not stream on this socket at all: SmartCore firmware
 # built on ESP-IDF v5.5.5/v6.0.1+ (seen on 3.2.2) never registers websocket
 # clients, so it drops every message it would send them.
-LUNATONE_GREETING_TIMEOUT_S = 10
-ISSUE_LUNATONE_SILENT = "lunatone_socket_silent"
+DALI_IP_GREETING_TIMEOUT_S = 10
+ISSUE_DALI_IP_SILENT = "dali_ip_socket_silent"
 
-# The Lunatone socket echoes every frame the SmartCore transmits as a daliMonitor
-# frame (externalSource false) while "DALI IP Interface" is on. A query answered
+# The DALI IP Interface socket echoes every frame the SmartCore transmits as a
+# daliMonitor frame (externalSource false) while "DALI IP Interface" is on. A query answered
 # over HTTP was transmitted, so no daliMonitor at all within this many seconds
 # means the stream died after the greeting (the socket was taken over by another
 # client, or closed on the device side). The hub then reconnects.
-LUNATONE_ECHO_TIMEOUT_S = 15
-LUNATONE_ECHO_CHECK_S = 5
-ISSUE_LUNATONE_LOST = "lunatone_stream_lost"
+DALI_IP_ECHO_TIMEOUT_S = 15
+DALI_IP_ECHO_CHECK_S = 5
+ISSUE_DALI_IP_LOST = "dali_ip_stream_lost"
+# Keys of the same two repair issues in v1.0.0 / v1.1.0, deleted on setup so an
+# issue raised under the old key does not stay behind after the update
+LEGACY_ISSUE_KEYS = ("lunatone_socket_silent", "lunatone_stream_lost")
 
 # Lights turn unavailable after this many DALI requests in a row failed to reach
 # the SmartCore (connection refused, timeout, HTTP error), and back on the next success.
@@ -77,3 +80,5 @@ DOUBLE_PRESS_GAP_S = 0.4  # max gap between a release and the next press to coun
 # A long press ends after this hold time even without its release: a lost
 # button_released would otherwise repeat long_press_repeat until the next press.
 LONG_PRESS_MAX_S = 10
+# Speed encoders send no stop event: rotate_stop follows this long after the last step
+ENCODER_SPEED_STOP_S = 1.0

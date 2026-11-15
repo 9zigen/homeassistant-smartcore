@@ -22,14 +22,14 @@ hub_module = load_hub()
 
 
 class FakeSmartCore:
-    """Lunatone socket on /, web UI socket on /ws, settings and command endpoints."""
+    """DALI IP Interface socket on /, web UI socket on /ws, settings and command endpoints."""
 
     def __init__(self) -> None:
         self.commands: list[str] = []
         self.ui_sockets: list[web.WebSocketResponse] = []
-        self.lunatone_sockets: list[web.WebSocketResponse] = []
+        self.dali_ip_sockets: list[web.WebSocketResponse] = []
         self.app = web.Application()
-        self.app.router.add_get("/", self._lunatone)
+        self.app.router.add_get("/", self._dali_ip)
         self.app.router.add_get("/ws", self._ui)
         self.app.router.add_get("/settings", self._settings)
         self.app.router.add_post("/cmd/{cmd}", self._cmd)
@@ -44,8 +44,8 @@ class FakeSmartCore:
             pass
         return ws
 
-    async def _lunatone(self, request):
-        return await self._socket(request, self.lunatone_sockets, json.dumps({"type": "info"}))
+    async def _dali_ip(self, request):
+        return await self._socket(request, self.dali_ip_sockets, json.dumps({"type": "info"}))
 
     async def _ui(self, request):
         return await self._socket(request, self.ui_sockets)
@@ -61,12 +61,12 @@ class FakeSmartCore:
         for ws in self.ui_sockets:
             await ws.send_str(message)
 
-    async def send_lunatone_frame(self, data: list[int]) -> None:
+    async def send_dali_ip_frame(self, data: list[int]) -> None:
         message = {
             "type": "daliMonitor",
             "data": {"line": 0, "bits": 24, "externalSource": True, "data": data},
         }
-        for ws in self.lunatone_sockets:
+        for ws in self.dali_ip_sockets:
             await ws.send_str(json.dumps(message))
 
 
@@ -91,7 +91,7 @@ async def device():
     hub.add_builtin_input_listener(lambda pin, level: builtin.append((pin, level)))
     hub.add_monitor_listener(lambda frame: frames.append(frame.data))
     await hub.async_start()
-    await _until(lambda: fake.ui_sockets and fake.lunatone_sockets)
+    await _until(lambda: fake.ui_sockets and fake.dali_ip_sockets)
     try:
         yield fake, hub, builtin, frames
     finally:
@@ -115,10 +115,10 @@ async def test_reports_builtin_input_edges(device):
     assert builtin == [(3, 1), (3, 0)]
 
 
-async def test_dali_stays_on_the_lunatone_socket(device):
+async def test_dali_stays_on_the_dali_ip_interface_socket(device):
     fake, _hub, builtin, frames = device
     await fake.send_ui("DALI2:1,0,1")  # the input monitor's DALI-2 events are ignored
-    await fake.send_lunatone_frame([2, 0x80, 1])
+    await fake.send_dali_ip_frame([2, 0x80, 1])
     await fake.send_ui("IN:0,1")
     await _until(lambda: builtin and frames)
     await asyncio.sleep(0.2)

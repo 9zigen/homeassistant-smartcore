@@ -1,8 +1,8 @@
 """Raw DALI-2 frame construction and decoding.
 
 This module is deliberately pure (no I/O, no Home Assistant imports) so it can
-be unit-tested on its own. The Atios SmartCore does *not* expose the Lunatone
-REST device API, so every light action is expressed as a raw 16-bit forward
+be unit-tested on its own. The Atios SmartCore does *not* expose a REST device
+API for DALI, so every light action is expressed as a raw 16-bit forward
 frame and every status read is a QUERY; hub.py sends both over the HTTP
 ``/api/dali/iface`` endpoint. Bus traffic (incl. input events) comes back as
 ``daliMonitor`` frames on the websocket and is decoded here.
@@ -256,7 +256,7 @@ class InputEvent:
 def decode_input_event(data: list[int], bits: int) -> InputEvent | None:
     """Decode a monitored frame into an InputEvent, or None if not a 24-bit event.
 
-    24-bit event frame (device-addressed, the Lunatone default), bits [23..0]:
+    24-bit event frame (device-addressed, the usual default), bits [23..0]:
 
         byte0: 0 AAAAAA 0   short address 0..63 in bits 22..17; bit16 is 0 for
                             every event message (1 = 24-bit command)
@@ -266,7 +266,7 @@ def decode_input_event(data: list[int], bits: int) -> InputEvent | None:
         byte2: DDDDDDDD     bits 7..0 (rest of event info)
 
     Group/instance/broadcast-addressed events set bit23; we decode the event
-    info but not the source address for those (rare with Lunatone couplers).
+    info but not the source address for those (rare with DALI-2 couplers).
     Verified byte-for-byte against python-dali across all addresses/events.
     """
     if bits != 24 or len(data) < 3:
@@ -319,3 +319,67 @@ def decode_quiescent_command(data: list[int], bits: int) -> bool | None:
     if opcode == OP_DA24_STOP_QUIESCENT_MODE:
         return False
     return None
+
+
+# ---- Rotary encoders and absolute inputs (IEC 62386-103 generic, -302) ------
+# Decoded like the SmartCore firmware does (lib-dali light_relative_control.c,
+# light_absolute_control.c), so Home Assistant reads them the same way.
+
+INSTANCE_TYPE_GENERIC = 0  # relative rotary encoder
+INSTANCE_TYPE_ABSOLUTE = 2  # absolute input, IEC 62386-302 (slider, rotary switch)
+
+# Standard relative encoder: rotation start right / left and stop, in the low nibble
+_ROTATION_DIRECTIONS = {0x00: "right", 0x01: "left", 0x02: "stop"}
+# Speed encoder: right 3/2/1 and left 6/5/4 for slow/medium/fast, no stop event
+_SPEED_RIGHT_SLOW = 3
+_SPEED_LEFT_SLOW = 6
+_ROTATION_SPEEDS = ("slow", "medium", "fast")
+
+# Up to 10 bits the position is a 10-bit event; some models send 0..255 instead
+_POSITION_EVENT_MAX = 1023
+_POSITION_EVENT_MAX_RIGHT_ALIGNED = 255
+
+
+@dataclass(frozen=True)
+class EncoderModel:
+    """Encoder details of a DALI-2 input device model, known by its GTIN."""
+
+    speed_instances: frozenset[int] = frozenset()
+    right_aligned_positions: bool = False
+
+
+# Same list as the SmartCore web configurator (vendors/supported.ts)
+ENCODER_MODELS: dict[int, EncoderModel] = {
+    # Gira 202700 DALI-2 rotary dimming insert: instance 1 relative, 2 rotation speed
+    4010337129592: EncoderModel(frozenset({2}), right_aligned_positions=True),
+    # Feller 40095.DALI.D2.BSE, the same hardware as the Gira 202700
+    7613175104362: EncoderModel(frozenset({2}), right_aligned_positions=True),
+}
+
+
+@dataclass(frozen=True)
+class Rotation:
+    """One rotary encoder event."""
+
+    direction: str  # "right", "left" or "stop"
+    speed: str | None = None  # "slow", "medium" or "fast" for speed encoders
+
+
+def decode_rotation(event_info: int, speed_encoder: bool = False) -> Rotation | None:
+    """Rotation of a relative (generic) instance event, None for other event codes."""
+    code = event_info & 0x0F
+    if not speed_encoder:
+        direction = _ROTATION_DIRECTIONS.get(code)
+        return Rotation(direction) if direction else None
+    if not 1 <= code <= _SPEED_LEFT_SLOW:
+        return None
+    right = code <= _SPEED_RIGHT_SLOW
+    slow_code = _SPEED_RIGHT_SLOW if right else _SPEED_LEFT_SLOW
+    return Rotation("right" if right else "left", _ROTATION_SPEEDS[slow_code - code])
+
+
+def position_percent(event_info: int, right_aligned: bool = False) -> int:
+    """Position of an absolute instance event in percent, rounded like the firmware."""
+    maximum = _POSITION_EVENT_MAX_RIGHT_ALIGNED if right_aligned else _POSITION_EVENT_MAX
+    value = min(event_info & _POSITION_EVENT_MAX, maximum)
+    return (value * 100 + maximum // 2) // maximum

@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .dali import Target
+from .dali import ENCODER_MODELS, Target
 
+INSTANCE_GENERIC = 0  # relative rotary encoder
 INSTANCE_PUSHBUTTON = 1
 INSTANCE_ABSOLUTE_INPUT = 2
 INSTANCE_OCCUPANCY = 3
@@ -61,6 +62,9 @@ class InputInstance:
     type: int
     active: bool
     event_scheme: int
+    resolution: int = 0
+    # Stored by the SmartCore for absolute instances of models that send 0..255
+    position_right_aligned: bool | None = None
 
     def expected_signature(self, short_address: int) -> str | None:
         """The InputEvent.signature this instance's events decode to, if known.
@@ -83,6 +87,19 @@ class InputDevice:
     name: str
     address: int
     instances: tuple[InputInstance, ...] = field(default_factory=tuple)
+    gtin: int | None = None
+
+    def is_speed_encoder(self, instance: InputInstance) -> bool:
+        """A relative instance that reports the turning speed instead of start / stop."""
+        model = ENCODER_MODELS.get(self.gtin) if self.gtin is not None else None
+        return model is not None and instance.number in model.speed_instances
+
+    def sends_right_aligned_positions(self, instance: InputInstance) -> bool:
+        """Absolute positions arrive as 0..255 instead of 10-bit events."""
+        if instance.position_right_aligned is not None:
+            return instance.position_right_aligned
+        model = ENCODER_MODELS.get(self.gtin) if self.gtin is not None else None
+        return model is not None and model.right_aligned_positions
 
 
 def parse_control_devices(devices: list[dict]) -> list[ControlDevice]:
@@ -115,6 +132,19 @@ def parse_control_devices(devices: list[dict]) -> list[ControlDevice]:
     return out
 
 
+def _parse_gtin(value: object) -> int | None:
+    """The GTIN as one number; the NVRAM stores it as a list of bytes, most significant first."""
+    if not isinstance(value, list) or not value:
+        return None
+    try:
+        gtin = 0
+        for byte in value:
+            gtin = (gtin << 8) | (int(byte) & 0xFF)
+    except (TypeError, ValueError):
+        return None
+    return gtin or None
+
+
 def parse_input_devices(devices: list[dict]) -> list[InputDevice]:
     """Parse the ``input_devices`` list."""
     out: list[InputDevice] = []
@@ -128,10 +158,21 @@ def parse_input_devices(devices: list[dict]) -> list[InputDevice]:
                 type=i.get("type", 0),
                 active=bool(i.get("active")),
                 event_scheme=i.get("event_scheme", SCHEME_DEVICE_INSTANCE),
+                resolution=i.get("resolution") or 0,
+                position_right_aligned=(
+                    i["position_right_aligned"]
+                    if isinstance(i.get("position_right_aligned"), bool)
+                    else None
+                ),
             )
             for i in (d.get("instances") or ())
         )
         out.append(
-            InputDevice(name=d.get("name") or f"Input {addr}", address=addr, instances=instances)
+            InputDevice(
+                name=d.get("name") or f"Input {addr}",
+                address=addr,
+                instances=instances,
+                gtin=_parse_gtin(d.get("gtin")),
+            )
         )
     return out

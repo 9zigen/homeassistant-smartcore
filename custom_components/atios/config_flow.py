@@ -80,7 +80,7 @@ class AtiosConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle a SmartCore found via mDNS.
 
-        Defensive about TXT keys: the real Lunatone gateway advertises
+        Defensive about TXT keys: other DALI IP gateways advertise
         manufacturer/type/uid/device, but the SmartCore emulation may expose a
         different set. We take the host as ground truth and use a stable device
         id if one is advertised, else fall back to the host.

@@ -2,7 +2,7 @@
 """Standalone DALI monitor/tracer for calibrating the Atios SmartCore.
 
 Native aiohttp websocket client (no dali2iot). Connects to the SmartCore's
-emulated Lunatone websocket, prints every message raw, and decodes anything that
+DALI IP Interface websocket, prints every message raw, and decodes anything that
 looks like a monitored DALI frame with the integration's own decoder.
 
     pip install aiohttp
