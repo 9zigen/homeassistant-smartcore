@@ -45,6 +45,10 @@
     "lunatone_socket_silent": {
       "title": "SmartCore does not stream DALI events",
       "description": "Home Assistant is connected to the SmartCore at {host} (firmware {version}), but the device never answers on its DALI IP websocket, so button, occupancy and light-level entities and the `atios_dali_event` event stay silent. Lights are not affected.\n\nThis is a SmartCore firmware bug: firmware built on ESP-IDF v5.5.5/v6.0.1+ (seen on 3.2.2) never registers websocket clients and drops everything it would send them. Update the SmartCore to a firmware with the fix. This notice clears itself as soon as the device starts talking."
+    },
+    "lunatone_stream_lost": {
+      "title": "SmartCore stopped streaming DALI events",
+      "description": "The SmartCore at {host} (firmware {version}) answered DALI queries, but its DALI IP websocket stopped reporting bus frames, so button, occupancy and light-level entities and the `atios_dali_event` event went silent. Home Assistant reconnects on its own, more slowly while the stream stays silent. Lights are not affected.\n\nThe socket serves one client at a time: close other DALI IP clients (DALI Cockpit, `tools/monitor.py`, a second Home Assistant). Firmware before the fix for stale DALI IP websocket clients can also lose the stream when the device runs out of connections. This notice clears itself as soon as bus frames arrive again."
     }
   }
 }

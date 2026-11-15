@@ -17,6 +17,7 @@ from .const import (
     DEFAULT_LINE,
     DOMAIN,
     ISSUE_DALI_IP_DISABLED,
+    ISSUE_LUNATONE_LOST,
     ISSUE_LUNATONE_SILENT,
     SERVICE_RECALL_SCENE,
     SERVICE_SEND_FRAME,
@@ -56,6 +57,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> boo
     entry.async_on_unload(
         hub.add_stream_listener(lambda ok: _async_stream_changed(hass, entry, hub, ok))
     )
+    # ...and one that keeps streaming after the greeting.
+    entry.async_on_unload(
+        hub.add_stream_lost_listener(
+            lambda lost: _async_stream_lost_changed(hass, entry, hub, lost)
+        )
+    )
     await hub.async_fetch_settings()
 
     # Read the configured device model from NVRAM (same endpoint the web
@@ -89,7 +96,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> bo
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         await entry.runtime_data.async_stop()
-        for key in (ISSUE_DALI_IP_DISABLED, ISSUE_LUNATONE_SILENT):
+        for key in (ISSUE_DALI_IP_DISABLED, ISSUE_LUNATONE_SILENT, ISSUE_LUNATONE_LOST):
             ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, key))
     return unloaded
 
@@ -215,4 +222,23 @@ def _async_stream_changed(
             "host": hub.host,
             "version": hub.sw_version or "unknown",
         },
+    )
+
+
+@callback
+def _async_stream_lost_changed(
+    hass: HomeAssistant, entry: AtiosConfigEntry, hub: AtiosHub, lost: bool
+) -> None:
+    """Raise or clear the "SmartCore stopped streaming DALI events" repair issue."""
+    if not lost:
+        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, ISSUE_LUNATONE_LOST))
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        _issue_id(entry, ISSUE_LUNATONE_LOST),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_LUNATONE_LOST,
+        translation_placeholders={"host": hub.host, "version": hub.sw_version or "unknown"},
     )

@@ -52,6 +52,19 @@ ISSUE_DALI_IP_DISABLED = "dali_ip_interface_disabled"
 LUNATONE_GREETING_TIMEOUT_S = 10
 ISSUE_LUNATONE_SILENT = "lunatone_socket_silent"
 
+# The Lunatone socket echoes every frame the SmartCore transmits as a daliMonitor
+# frame (externalSource false) while "DALI IP Interface" is on. A query answered
+# over HTTP was transmitted, so no daliMonitor at all within this many seconds
+# means the stream died after the greeting (the socket was taken over by another
+# client, or closed on the device side). The hub then reconnects.
+LUNATONE_ECHO_TIMEOUT_S = 15
+LUNATONE_ECHO_CHECK_S = 5
+ISSUE_LUNATONE_LOST = "lunatone_stream_lost"
+
+# Lights turn unavailable after this many DALI requests in a row failed to reach
+# the SmartCore (connection refused, timeout, HTTP error), and back on the next success.
+UNAVAILABLE_AFTER_FAILURES = 3
+
 # Software gesture timing for Device/Instance-scheme couplers.
 # Confirmed on real Atios button couplers (2026-08-27): the bus only ever
 # carries raw button_pressed/button_released (event_info 0/1) — short_press/
@@ -61,3 +74,6 @@ ISSUE_LUNATONE_SILENT = "lunatone_socket_silent"
 LONG_PRESS_START_S = 0.4  # hold time before synthesizing long_press_start
 LONG_PRESS_REPEAT_S = 0.4  # interval between long_press_repeat while held
 DOUBLE_PRESS_GAP_S = 0.4  # max gap between a release and the next press to count as double_press
+# A long press ends after this hold time even without its release: a lost
+# button_released would otherwise repeat long_press_repeat until the next press.
+LONG_PRESS_MAX_S = 10

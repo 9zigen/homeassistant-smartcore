@@ -15,7 +15,7 @@ and group queries collide on the bus, so those stay optimistic).
 from __future__ import annotations
 
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -98,6 +98,18 @@ class AtiosLight(LightEntity):
         self._attr_assumed_state = target.type is not TargetType.SHORT
         self._attr_is_on = False
         self._attr_brightness: int | None = None
+
+    @property
+    def available(self) -> bool:
+        """Unavailable while the SmartCore does not answer DALI requests at all."""
+        return self._hub.available
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._hub.add_available_listener(self._on_available_changed))
+
+    @callback
+    def _on_available_changed(self, _available: bool) -> None:
+        self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs) -> None:
         if ATTR_BRIGHTNESS in kwargs:

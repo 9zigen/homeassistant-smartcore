@@ -40,7 +40,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
 from . import AtiosConfigEntry
-from .const import DOMAIN, DOUBLE_PRESS_GAP_S, EVENT_DALI, LONG_PRESS_REPEAT_S, LONG_PRESS_START_S
+from .const import (
+    DOMAIN,
+    DOUBLE_PRESS_GAP_S,
+    EVENT_DALI,
+    LONG_PRESS_MAX_S,
+    LONG_PRESS_REPEAT_S,
+    LONG_PRESS_START_S,
+)
 from .dali import (
     PUSHBUTTON_EVENTS,
     decode_input_event,
@@ -96,6 +103,7 @@ class _PressState:
     phase: _PressPhase = _PressPhase.IDLE
     pending_double: bool = False
     cancel_timer: Callable[[], None] | None = None
+    long_repeats: int = 0  # long_press_repeat sent in the current hold
 
 
 class _ButtonManager:
@@ -136,6 +144,9 @@ class _ButtonManager:
             "event_info": decoded.event_info,
             "gesture": decoded.gesture,
             "signature": decoded.signature,
+            # device clock and message counter, for timing traces and lost frames
+            "device_timestamp": getattr(event, "device_timestamp", None),
+            "counter": getattr(event, "counter", None),
         }
         # always publish the raw decoded event for automations / calibration
         self._hass.bus.async_fire(EVENT_DALI, payload)
@@ -195,9 +206,14 @@ class _ButtonManager:
                 state.cancel_timer = None
 
         if is_press:
+            if state.phase in (_PressPhase.PRESSED, _PressPhase.LONG):
+                # Still held: a repeated button_pressed, not a new press. Keep
+                # the running long-press timing instead of starting over.
+                return
             state.pending_double = state.phase is _PressPhase.WAIT_DOUBLE
             _cancel()
             state.phase = _PressPhase.PRESSED
+            state.long_repeats = 0
 
             @callback
             def _long_start(_now: object) -> None:
@@ -210,6 +226,14 @@ class _ButtonManager:
             @callback
             def _repeat(_now: object) -> None:
                 if state.phase is not _PressPhase.LONG:
+                    return
+                state.long_repeats += 1
+                held_s = LONG_PRESS_START_S + state.long_repeats * LONG_PRESS_REPEAT_S
+                if held_s >= LONG_PRESS_MAX_S:
+                    # No release within LONG_PRESS_MAX_S: it was most likely lost
+                    state.phase = _PressPhase.IDLE
+                    state.cancel_timer = None
+                    self._dispatch(signature, "long_press_stop", payload)
                     return
                 self._dispatch(signature, "long_press_repeat", payload)
                 _arm_repeat()
