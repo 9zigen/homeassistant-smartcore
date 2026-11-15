@@ -28,6 +28,8 @@ DEFAULT_PANEL_ADMIN = True
 
 # how a raw daliMonitor input event is surfaced on the HA event bus
 EVENT_DALI = f"{DOMAIN}_dali_event"
+# how a built-in input edge is surfaced on the HA event bus
+EVENT_INPUT = f"{DOMAIN}_input_event"
 
 # service names
 SERVICE_SEND_FRAME = "send_dali_frame"

@@ -72,6 +72,16 @@ standalone or alongside a Matter-paired SmartCore.
    clients. The integration detects this and raises a repair notice; it needs
    a SmartCore firmware with the fix.
 
+7. **Built-in inputs (optional, newer firmware 3.2.64+):** SmartCore firmware with
+   the input monitor also reports its 12 input terminals. Each input appears
+   as a binary sensor (**Input 1** … **Input 12**) the first time it changes,
+   and every edge is fired as an `atios_input_event`
+   (`{"input": 1, "pin": 0, "level": 1}`). The state is the raw electrical
+   level, before the invert of the SmartCore's own accessory configuration,
+   and reads unknown after a restart until the input changes again. It only
+   works while the SmartCore has no web password. DALI buttons and sensors
+   still come from the DALI IP Interface (step 6).
+
 We plan to submit this integration to Home Assistant core in a bit.
 
 ## Status
@@ -87,6 +97,7 @@ We plan to submit this integration to Home Assistant core in a bit.
 | `send_dali_frame` / `recall_scene` services | ✅ |
 | DALI-2 event decode (`dali.py`) | ✅ 62386-103/-301, verified byte-for-byte vs python-dali on 585 frames |
 | Button events (`event.py`) | ✅ pre-created from the NVRAM model with configured names; unknown buttons still auto-appear on first press |
+| Built-in inputs on `ws://<host>/ws` (`inputs.py`) | 🟨 input monitor edges, lease renewed every 10 s; DALI stays on the Lunatone socket; tested against a fake device, needs firmware with the input monitor |
 | Occupancy sensors (62386-303) | 🟨 entities from NVRAM, state from bus events; bit mapping still to be verified on hardware |
 | Light sensors (62386-304) | 🟨 entities from NVRAM, raw 10-bit level; lux conversion pending hardware verification |
 | Zeroconf discovery | 🟨 flow built; confirm the SmartCore's actual mDNS/TXT on device and tighten the manifest |

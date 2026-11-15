@@ -36,6 +36,12 @@ firmware source, lib-dali ``dali_transport_layer.c`` / ``dali_ip_websocket.c``):
     handler's handshake branch, so it registers no client and silently drops
     the greeting and everything after it. We watch for any Lunatone JSON after
     connecting and report its absence via add_stream_listener.
+
+A second socket, the web UI's ``ws://<host>/ws``, carries the input monitor of
+newer firmware (see inputs.py). Only its built-in input edges are used, reported
+through add_builtin_input_listener: the Lunatone socket stays the one transport
+for DALI, so the input monitor's DALI-2 events are ignored. Firmware without the
+input monitor ignores the lease command and sends nothing on this socket.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ import aiohttp
 
 from .const import LUNATONE_GREETING_TIMEOUT_S, RECONNECT_MAX, RECONNECT_MIN
 from .dali import Frame
+from .inputs import CMD_INPUT_MONITOR_START, LEASE_RENEW_S, parse_builtin_input
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,10 +149,16 @@ class AtiosHub:
         # firmware source). /ws also accepts a ws, but that is the web UI's
         # socket and only carries the plain-text monitor, never daliMonitor.
         self._ws_url = f"ws://{self._host}/"
+        # The web UI socket, which carries the input monitor (see inputs.py)
+        self._input_ws_url = f"ws://{self._host}/ws"
         self._line = line
         self._session = session
 
         self._task: asyncio.Task | None = None
+        self._input_task: asyncio.Task | None = None
+        self._input_ws_warned = False
+        self._lease_warned = False
+        self._builtin_input_cbs: list[Callable[[int, int], None]] = []
         self._closing = False
         self._ws_warned = False
         self._monitor_cbs: list[Callable[[MonitorFrame], None]] = []
@@ -310,17 +323,28 @@ class AtiosHub:
     async def async_start(self) -> None:
         self._closing = False
         self._task = asyncio.create_task(self._run_monitor(), name=f"atios-{self._host}")
+        self._input_task = asyncio.create_task(
+            self._run_input_monitor(), name=f"atios-inputs-{self._host}"
+        )
 
     async def async_stop(self) -> None:
+        # The input monitor lease is not released: the web UI may hold it too,
+        # and the firmware ends it by itself once nobody renews it.
         self._closing = True
-        if self._task:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+        for task in (self._task, self._input_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     def add_monitor_listener(self, cb: Callable[[MonitorFrame], None]) -> Callable[[], None]:
         self._monitor_cbs.append(cb)
         return lambda: self._monitor_cbs.remove(cb)
+
+    def add_builtin_input_listener(self, cb: Callable[[int, int], None]) -> Callable[[], None]:
+        """Call ``cb(pin, level)`` on every built-in input edge (pin 0 = input 1, raw level)."""
+        self._builtin_input_cbs.append(cb)
+        return lambda: self._builtin_input_cbs.remove(cb)
 
     def add_ip_interface_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
         """Call ``cb(enabled)`` whenever the "DALI IP Interface" state changes."""
@@ -415,6 +439,73 @@ class AtiosHub:
                 cb(frame)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Atios monitor listener failed")
+
+    # ---- input monitor on the web UI socket (best-effort) -----------------
+
+    async def _run_input_monitor(self) -> None:
+        backoff = RECONNECT_MIN
+        while not self._closing:
+            lease: asyncio.Task | None = None
+            try:
+                async with self._session.ws_connect(
+                    self._input_ws_url, heartbeat=30, timeout=aiohttp.ClientTimeout(total=10)
+                ) as ws:
+                    self._input_ws_warned = False
+                    backoff = RECONNECT_MIN
+                    _LOGGER.debug("Atios %s: input monitor websocket connected", self._host)
+                    lease = asyncio.create_task(self._renew_input_lease())
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            self._handle_input_text(msg.data)
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                if self._closing:
+                    break
+                log = _LOGGER.debug if self._input_ws_warned else _LOGGER.info
+                log("Atios %s: input monitor websocket unavailable (%s)", self._host, err)
+                self._input_ws_warned = True
+            finally:
+                if lease is not None:
+                    lease.cancel()
+            if not self._closing:
+                await asyncio.sleep(backoff)
+                backoff = min(RECONNECT_MAX, backoff * 2)
+
+    async def _renew_input_lease(self) -> None:
+        """Hold the input monitor lease while the socket is connected."""
+        while True:
+            await self._post_input_lease()
+            await asyncio.sleep(LEASE_RENEW_S)
+
+    async def _post_input_lease(self) -> None:
+        try:
+            async with self._session.post(
+                f"{self._base_url}/cmd/{CMD_INPUT_MONITOR_START}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 401 and not self._lease_warned:
+                    self._lease_warned = True
+                    _LOGGER.warning(
+                        "Atios %s: the SmartCore has a web password, so it does not "
+                        "send built-in input events to Home Assistant.",
+                        self._host,
+                    )
+                resp.raise_for_status()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Atios %s: input monitor lease failed: %s", self._host, err)
+
+    def _handle_input_text(self, raw: str) -> None:
+        edge = parse_builtin_input(raw)
+        if edge is None:
+            return
+        for cb in list(self._builtin_input_cbs):
+            try:
+                cb(edge.pin, edge.level)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Atios built-in input listener failed")
 
     # ---- sending / querying (HTTP, confirmed) -----------------------------
 

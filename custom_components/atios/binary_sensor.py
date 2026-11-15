@@ -1,4 +1,14 @@
-"""Binary sensor platform: DALI-2 occupancy sensors (IEC 62386-303).
+"""Binary sensor platform: DALI-2 occupancy sensors and built-in inputs.
+
+Built-in inputs (the SmartCore's 12 input terminals) come from the input
+monitor of newer firmware (see inputs.py). An input appears as an entity the
+first time it changes and is restored from the entity registry afterwards. The
+state is the raw electrical level (on = high), before the invert of the
+SmartCore's own accessory configuration. The firmware sends edges only, so an
+input reads unknown after a restart until it changes. Every edge is also fired
+on the HA event bus as ``atios_input_event``.
+
+DALI-2 occupancy sensors (IEC 62386-303):
 
 Occupancy instances found in the SmartCore's NVRAM device model become
 ``binary_sensor`` entities driven by the websocket bus monitor. State comes
@@ -18,11 +28,12 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import AtiosConfigEntry
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_INPUT
 from .dali import decode_input_event
 from .hub import MonitorFrame
 from .nvram import INSTANCE_OCCUPANCY
@@ -37,6 +48,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = entry.runtime_data
+    _setup_builtin_inputs(hass, entry, async_add_entities)
+
     entities: list[AtiosOccupancySensor] = []
     by_signature: dict[str, AtiosOccupancySensor] = {}
     for dev in hub.input_devices:
@@ -93,5 +106,58 @@ class AtiosOccupancySensor(BinarySensorEntity):
             "movement": bool(event_info & MOVEMENT_BIT),
             "event_info": event_info,
         }
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+
+def _builtin_input_unique_id(entry: AtiosConfigEntry, pin: int) -> str:
+    return f"{entry.unique_id}_input_{pin}"
+
+
+def _setup_builtin_inputs(
+    hass: HomeAssistant, entry: AtiosConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Restore the built-in inputs seen before and add the others on their first edge."""
+    hub = entry.runtime_data
+    inputs: dict[int, AtiosBuiltinInput] = {}
+
+    prefix = _builtin_input_unique_id(entry, 0).removesuffix("0")
+    registry = er.async_get(hass)
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if reg_entry.domain != "binary_sensor" or not reg_entry.unique_id.startswith(prefix):
+            continue
+        suffix = reg_entry.unique_id.removeprefix(prefix)
+        if suffix.isdigit():
+            inputs[int(suffix)] = AtiosBuiltinInput(entry, int(suffix))
+    if inputs:
+        async_add_entities(list(inputs.values()))
+
+    @callback
+    def on_builtin_input(pin: int, level: int) -> None:
+        hass.bus.async_fire(EVENT_INPUT, {"input": pin + 1, "pin": pin, "level": level})
+        entity = inputs.get(pin)
+        if entity is None:
+            entity = inputs[pin] = AtiosBuiltinInput(entry, pin)
+            async_add_entities([entity])
+        entity.handle_level(level)
+
+    entry.async_on_unload(hub.add_builtin_input_listener(on_builtin_input))
+
+
+class AtiosBuiltinInput(BinarySensorEntity):
+    """One built-in input terminal: on while its raw level is high."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, entry: AtiosConfigEntry, pin: int) -> None:
+        self._attr_name = f"Input {pin + 1}"
+        self._attr_unique_id = _builtin_input_unique_id(entry, pin)
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.unique_id)})
+        self._attr_is_on = None  # the firmware sends edges only, unknown until the first one
+
+    @callback
+    def handle_level(self, level: int) -> None:
+        self._attr_is_on = level == 1
         if self.hass is not None:
             self.async_write_ha_state()
