@@ -1,4 +1,4 @@
-"""Hub tests for the Lunatone stream watchdog, query answers and availability.
+"""Hub tests for the DALI IP Interface stream watchdog, query answers and availability.
 
 Against a fake SmartCore (aiohttp test server). Needs aiohttp (it ships with
 Home Assistant) and pytest-asyncio; skipped without them.
@@ -24,26 +24,26 @@ dali = __import__("atios_pkg.dali", fromlist=["Target"])
 
 
 class FakeSmartCore:
-    """Lunatone socket that greets but echoes nothing unless told to, and /api/dali/iface."""
+    """DALI IP Interface socket that greets but echoes nothing on its own, plus /api/dali/iface."""
 
     def __init__(self) -> None:
-        self.lunatone: list[web.WebSocketResponse] = []
+        self.dali_ip: list[web.WebSocketResponse] = []
         self.handshakes = 0
         self.iface_status = 200
         self.iface_frames: list[list[int]] = []
         self.iface_body = {"success": True, "bus_busy": False, "collision_detected": False, "data": 200}
         self.app = web.Application()
-        self.app.router.add_get("/", self._lunatone)
+        self.app.router.add_get("/", self._dali_ip)
         self.app.router.add_get("/ws", self._ui)
         self.app.router.add_get("/settings", self._settings)
         self.app.router.add_post("/cmd/{cmd}", self._ok)
         self.app.router.add_post("/api/dali/iface", self._iface)
 
-    async def _lunatone(self, request):
+    async def _dali_ip(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self.handshakes += 1
-        self.lunatone.append(ws)
+        self.dali_ip.append(ws)
         await ws.send_str(json.dumps({"type": "info"}))
         async for _msg in ws:
             pass
@@ -75,7 +75,7 @@ class FakeSmartCore:
                      "timestamp": 12.5},
             "timeSignature": {"timestamp": 12.6, "counter": counter},
         }
-        for ws in self.lunatone:
+        for ws in self.dali_ip:
             if not ws.closed:
                 await ws.send_str(json.dumps(message))
 
@@ -91,8 +91,8 @@ async def _until(predicate, timeout=3.0):
 
 @pytest_asyncio.fixture
 async def device(monkeypatch):
-    monkeypatch.setattr(hub_module, "LUNATONE_ECHO_TIMEOUT_S", 0.3)
-    monkeypatch.setattr(hub_module, "LUNATONE_ECHO_CHECK_S", 0.05)
+    monkeypatch.setattr(hub_module, "DALI_IP_ECHO_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(hub_module, "DALI_IP_ECHO_CHECK_S", 0.05)
     monkeypatch.setattr(hub_module, "RECONNECT_MIN", 0.05)
     fake = FakeSmartCore()
     server = TestServer(fake.app)
@@ -155,7 +155,7 @@ async def test_frames_carry_the_device_time_and_counter(device):
                  "timestamp": 101.25},
         "timeSignature": {"timestamp": 101.3, "counter": 42},
     }
-    await fake.lunatone[0].send_str(json.dumps(message))
+    await fake.dali_ip[0].send_str(json.dumps(message))
     await _until(lambda: frames)
     assert frames[0].device_timestamp == 101.25
     assert frames[0].counter == 42

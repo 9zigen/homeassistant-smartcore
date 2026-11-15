@@ -18,8 +18,9 @@ from .const import (
     DEFAULT_LINE,
     DOMAIN,
     ISSUE_DALI_IP_DISABLED,
-    ISSUE_LUNATONE_LOST,
-    ISSUE_LUNATONE_SILENT,
+    ISSUE_DALI_IP_LOST,
+    ISSUE_DALI_IP_SILENT,
+    LEGACY_ISSUE_KEYS,
     SERVICE_RECALL_SCENE,
     SERVICE_SEND_FRAME,
 )
@@ -54,7 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> boo
             lambda enabled: _async_ip_interface_changed(hass, entry, hub, enabled)
         )
     )
-    # ...and a SmartCore firmware that actually talks on the Lunatone socket.
+    # ...and a SmartCore firmware that actually talks on the DALI IP Interface socket.
     entry.async_on_unload(
         hub.add_stream_listener(lambda ok: _async_stream_changed(hass, entry, hub, ok))
     )
@@ -64,6 +65,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> boo
             lambda lost: _async_stream_lost_changed(hass, entry, hub, lost)
         )
     )
+    for key in LEGACY_ISSUE_KEYS:
+        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, key))
     await hub.async_fetch_settings()
 
     # Read the configured device model from NVRAM (same endpoint the web
@@ -97,7 +100,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> bo
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         await entry.runtime_data.async_stop()
-        for key in (ISSUE_DALI_IP_DISABLED, ISSUE_LUNATONE_SILENT, ISSUE_LUNATONE_LOST):
+        for key in (ISSUE_DALI_IP_DISABLED, ISSUE_DALI_IP_SILENT, ISSUE_DALI_IP_LOST):
             ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, key))
     return unloaded
 
@@ -212,7 +215,7 @@ def _async_stream_changed(
 ) -> None:
     """Raise or clear the "SmartCore does not stream DALI events" repair issue."""
     if ok:
-        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, ISSUE_LUNATONE_SILENT))
+        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, ISSUE_DALI_IP_SILENT))
         return
     _LOGGER.warning(
         "Atios %s: connected to the DALI IP websocket, but the SmartCore "
@@ -225,10 +228,10 @@ def _async_stream_changed(
     ir.async_create_issue(
         hass,
         DOMAIN,
-        _issue_id(entry, ISSUE_LUNATONE_SILENT),
+        _issue_id(entry, ISSUE_DALI_IP_SILENT),
         is_fixable=False,
         severity=ir.IssueSeverity.ERROR,
-        translation_key=ISSUE_LUNATONE_SILENT,
+        translation_key=ISSUE_DALI_IP_SILENT,
         translation_placeholders={
             "host": hub.host,
             "version": hub.sw_version or "unknown",
@@ -242,14 +245,14 @@ def _async_stream_lost_changed(
 ) -> None:
     """Raise or clear the "SmartCore stopped streaming DALI events" repair issue."""
     if not lost:
-        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, ISSUE_LUNATONE_LOST))
+        ir.async_delete_issue(hass, DOMAIN, _issue_id(entry, ISSUE_DALI_IP_LOST))
         return
     ir.async_create_issue(
         hass,
         DOMAIN,
-        _issue_id(entry, ISSUE_LUNATONE_LOST),
+        _issue_id(entry, ISSUE_DALI_IP_LOST),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key=ISSUE_LUNATONE_LOST,
+        translation_key=ISSUE_DALI_IP_LOST,
         translation_placeholders={"host": hub.host, "version": hub.sw_version or "unknown"},
     )

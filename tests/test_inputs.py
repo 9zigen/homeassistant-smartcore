@@ -26,7 +26,7 @@ def test_ignores_everything_else_on_the_web_ui_socket():
         "pong",
         '{"system_event":true}',
         "DALI:[IN],DA24 Evt,88841F,NA",
-        "DALI2:1,0,1",  # DALI goes over the Lunatone socket
+        "DALI2:1,0,1",  # DALI goes over the DALI IP Interface socket
         "TP:to bus,1.1.1,1/1/1,GroupValueWrite,01",
         "IN:12,1",  # 12 built-in inputs: 0..11
         "IN:3,2",

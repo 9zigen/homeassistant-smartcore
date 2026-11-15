@@ -1,8 +1,8 @@
 """Raw DALI-2 frame construction and decoding.
 
 This module is deliberately pure (no I/O, no Home Assistant imports) so it can
-be unit-tested on its own. The Atios SmartCore does *not* expose the Lunatone
-REST device API, so every light action is expressed as a raw 16-bit forward
+be unit-tested on its own. The Atios SmartCore does *not* expose a REST device
+API for DALI, so every light action is expressed as a raw 16-bit forward
 frame and every status read is a QUERY; hub.py sends both over the HTTP
 ``/api/dali/iface`` endpoint. Bus traffic (incl. input events) comes back as
 ``daliMonitor`` frames on the websocket and is decoded here.
@@ -256,7 +256,7 @@ class InputEvent:
 def decode_input_event(data: list[int], bits: int) -> InputEvent | None:
     """Decode a monitored frame into an InputEvent, or None if not a 24-bit event.
 
-    24-bit event frame (device-addressed, the Lunatone default), bits [23..0]:
+    24-bit event frame (device-addressed, the usual default), bits [23..0]:
 
         byte0: 0 AAAAAA 0   short address 0..63 in bits 22..17; bit16 is 0 for
                             every event message (1 = 24-bit command)
@@ -266,7 +266,7 @@ def decode_input_event(data: list[int], bits: int) -> InputEvent | None:
         byte2: DDDDDDDD     bits 7..0 (rest of event info)
 
     Group/instance/broadcast-addressed events set bit23; we decode the event
-    info but not the source address for those (rare with Lunatone couplers).
+    info but not the source address for those (rare with DALI-2 couplers).
     Verified byte-for-byte against python-dali across all addresses/events.
     """
     if bits != 24 or len(data) < 3:

@@ -103,7 +103,7 @@ We plan to submit this integration to Home Assistant core in a bit.
 | `send_dali_frame` / `recall_scene` services | ✅ |
 | DALI-2 event decode (`dali.py`) | ✅ 62386-103/-301, verified byte-for-byte vs python-dali on 585 frames |
 | Button events (`event.py`) | ✅ pre-created from the NVRAM model with configured names; unknown buttons still auto-appear on first press |
-| Built-in inputs on `ws://<host>/ws` (`inputs.py`) | 🟨 input monitor edges, lease renewed every 10 s; DALI stays on the Lunatone socket; tested against a fake device, needs firmware with the input monitor |
+| Built-in inputs on `ws://<host>/ws` (`inputs.py`) | ✅ input monitor edges, lease renewed every 10 s; DALI stays on the DALI IP Interface socket; tested against a fake device, needs firmware with the input monitor |
 | Rotary encoders and absolute inputs | 🟨 event entities (`rotate_right` / `rotate_left` / `rotate_stop`, with speed for Gira 202700 / Feller 40095) and position sensors (%) from NVRAM; decoded like the firmware, to be verified on hardware |
 | Occupancy sensors (62386-303) | 🟨 entities from NVRAM, state from bus events; bit mapping still to be verified on hardware |
 | Light sensors (62386-304) | 🟨 entities from NVRAM, raw 10-bit level; lux conversion pending hardware verification |
