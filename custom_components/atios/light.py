@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -111,7 +112,15 @@ class AtiosLight(LightEntity):
     def _on_available_changed(self, _available: bool) -> None:
         self.async_write_ha_state()
 
+    def _raise_if_bus_scan(self) -> None:
+        if self._hub.bus_scan_active:
+            raise HomeAssistantError(
+                f"A DALI bus scan is running on the SmartCore ({self._hub.host}); "
+                "lights can be controlled again once it has finished."
+            )
+
     async def async_turn_on(self, **kwargs) -> None:
+        self._raise_if_bus_scan()
         if ATTR_BRIGHTNESS in kwargs:
             dali = ha_brightness_to_dali(kwargs[ATTR_BRIGHTNESS])
             await self._hub.send_frame(level(self._target, dali))
@@ -128,13 +137,14 @@ class AtiosLight(LightEntity):
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
+        self._raise_if_bus_scan()
         await self._hub.send_frame(off(self._target))
         self._attr_is_on = False
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
-        """Poll actual level for single-address lights only."""
-        if self._target.type is not TargetType.SHORT:
+        """Poll actual level for single-address lights only, not during a bus scan."""
+        if self._target.type is not TargetType.SHORT or self._hub.bus_scan_active:
             return
         answer = await self._hub.send_frame(query_actual_level(self._target))
         if not answer:

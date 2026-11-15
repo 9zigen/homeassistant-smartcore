@@ -8,6 +8,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -22,7 +23,7 @@ from .const import (
     SERVICE_RECALL_SCENE,
     SERVICE_SEND_FRAME,
 )
-from .dali import Frame, Target, goto_scene
+from .dali import Frame, Target, decode_quiescent_command, goto_scene
 from .hub import AtiosHub
 from .nvram import parse_control_devices, parse_input_devices
 from .panel import async_register_panel, async_remove_panel
@@ -144,19 +145,29 @@ def _register_services(hass: HomeAssistant) -> None:
             raise RuntimeError("No Atios SmartCore configured")
         return loaded[0].runtime_data
 
+    def _raise_if_bus_scan(hub: AtiosHub) -> None:
+        if hub.bus_scan_active:
+            raise HomeAssistantError(
+                f"A DALI bus scan is running on the SmartCore ({hub.host}); "
+                "DALI frames are sent again once it has finished."
+            )
+
     async def _send_frame(call: ServiceCall) -> None:
         hub = _first_hub()
-        await hub.send_frame(
-            Frame(
-                data=list(call.data["data"]),
-                bits=call.data.get("bits", 16),
-                send_twice=call.data.get("send_twice", False),
-                wait_for_answer=call.data.get("wait_for_answer", False),
-            )
+        frame = Frame(
+            data=list(call.data["data"]),
+            bits=call.data.get("bits", 16),
+            send_twice=call.data.get("send_twice", False),
+            wait_for_answer=call.data.get("wait_for_answer", False),
         )
+        # START / STOP QUIESCENT MODE still go out, so a stuck scan can be ended
+        if decode_quiescent_command(frame.data, frame.bits) is None:
+            _raise_if_bus_scan(hub)
+        await hub.send_frame(frame)
 
     async def _recall_scene(call: ServiceCall) -> None:
         hub = _first_hub()
+        _raise_if_bus_scan(hub)
         scene = call.data["scene"]
         addr = call.data.get("address")
         group = call.data.get("group")

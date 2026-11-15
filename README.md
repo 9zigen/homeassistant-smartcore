@@ -72,6 +72,12 @@ standalone or alongside a Matter-paired SmartCore.
    clients. The integration detects this and raises a repair notice; it needs
    a SmartCore firmware with the fix.
 
+   While the SmartCore (or another DALI master) scans the bus, it holds the
+   DALI-2 devices in quiescent mode. The integration follows that from the
+   same stream: the diagnostic **DALI bus scan** binary sensor turns on, light
+   polling pauses and light commands fail with a clear error until the scan
+   has finished, so Home Assistant does not disturb addressing.
+
 7. **Built-in inputs (optional, newer firmware 3.2.64+):** SmartCore firmware with
    the input monitor also reports its 12 input terminals. Each input appears
    as a binary sensor (**Input 1** … **Input 12**) the first time it changes,

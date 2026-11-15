@@ -30,6 +30,7 @@ class FakeSmartCore:
         self.lunatone: list[web.WebSocketResponse] = []
         self.handshakes = 0
         self.iface_status = 200
+        self.iface_frames: list[list[int]] = []
         self.iface_body = {"success": True, "bus_busy": False, "collision_detected": False, "data": 200}
         self.app = web.Application()
         self.app.router.add_get("/", self._lunatone)
@@ -61,7 +62,8 @@ class FakeSmartCore:
     async def _ok(self, _request):
         return web.Response()
 
-    async def _iface(self, _request):
+    async def _iface(self, request):
+        self.iface_frames.append((await request.json())["data"])
         if self.iface_status != 200:
             return web.Response(status=self.iface_status)
         return web.json_response(self.iface_body)
@@ -175,3 +177,33 @@ async def test_lights_go_unavailable_after_repeated_failures_and_come_back(devic
     await hub.send_frame(QUERY)
     assert hub.available
     assert changes == [False, True]
+
+
+async def test_a_bus_scan_pauses_dali_requests(device):
+    fake, hub = device
+    changes: list[bool] = []
+    hub.add_bus_scan_listener(changes.append)
+
+    await fake.echo([0xFF, 0xFE, 0x1D])  # START QUIESCENT MODE, sent by the web UI scan
+    await _until(lambda: hub.bus_scan_active)
+    assert await hub.send_frame(QUERY) is None
+    await hub.send_frame(dali.off(dali.Target.short(3)))
+    assert fake.iface_frames == []
+
+    # quiescent mode frames still go out, so a stuck scan can be ended
+    stop = dali.Frame(data=[0xFF, 0xFE, 0x1E], bits=24)
+    await hub.send_frame(stop)
+    assert fake.iface_frames == [[0xFF, 0xFE, 0x1E]]
+
+    await fake.echo([0xFF, 0xFE, 0x1E])
+    await _until(lambda: not hub.bus_scan_active)
+    assert await hub.send_frame(QUERY) == [200]
+    assert changes == [True, False]
+
+
+async def test_a_bus_scan_ends_by_itself_without_stop(device, monkeypatch):
+    fake, hub = device
+    monkeypatch.setattr(hub_module, "QUIESCENT_MODE_TIMEOUT_S", 0.2)
+    await fake.echo([0xFF, 0xFE, 0x1D])
+    await _until(lambda: hub.bus_scan_active)
+    await _until(lambda: not hub.bus_scan_active)

@@ -63,7 +63,7 @@ from .const import (
     RECONNECT_MIN,
     UNAVAILABLE_AFTER_FAILURES,
 )
-from .dali import Frame
+from .dali import QUIESCENT_MODE_TIMEOUT_S, Frame, decode_quiescent_command
 from .inputs import CMD_INPUT_MONITOR_START, LEASE_RENEW_S, parse_builtin_input
 
 _LOGGER = logging.getLogger(__name__)
@@ -196,6 +196,10 @@ class AtiosHub:
         # Consecutive DALI requests that did not reach the device
         self._send_failures = 0
         self._available_cbs: list[Callable[[bool], None]] = []
+        # Bus scan: quiescent mode seen on the bus, DALI requests paused meanwhile
+        self._bus_scan = False
+        self._bus_scan_cbs: list[Callable[[bool], None]] = []
+        self._bus_scan_expiry: asyncio.TimerHandle | None = None
         self._info: dict = {}
         self.control_devices: list = []  # nvram.ControlDevice, set at setup
         self.input_devices: list = []  # nvram.InputDevice, set at setup
@@ -360,6 +364,9 @@ class AtiosHub:
         # The input monitor lease is not released: the web UI may hold it too,
         # and the firmware ends it by itself once nobody renews it.
         self._closing = True
+        if self._bus_scan_expiry is not None:
+            self._bus_scan_expiry.cancel()
+            self._bus_scan_expiry = None
         for task in (self._task, self._input_task):
             if task:
                 task.cancel()
@@ -395,6 +402,43 @@ class AtiosHub:
         self._send_failures = 0 if reached else self._send_failures + 1
         if self.available != was_available:
             _notify(self._available_cbs, self.available)
+
+    @property
+    def bus_scan_active(self) -> bool:
+        """True while a bus scan holds the DALI-2 devices in quiescent mode.
+
+        Seen from the START / STOP QUIESCENT MODE broadcast on the Lunatone
+        stream (the SmartCore's own frames included), so it needs the "DALI IP
+        Interface". DALI requests from Home Assistant are paused meanwhile, so
+        they do not disturb addressing and do not read half-commissioned gear.
+        """
+        return self._bus_scan
+
+    def add_bus_scan_listener(self, cb: Callable[[bool], None]) -> Callable[[], None]:
+        """Call ``cb(active)`` when a bus scan starts or ends."""
+        self._bus_scan_cbs.append(cb)
+        return lambda: self._bus_scan_cbs.remove(cb)
+
+    def _set_bus_scan(self, active: bool) -> None:
+        if self._bus_scan_expiry is not None:
+            self._bus_scan_expiry.cancel()
+            self._bus_scan_expiry = None
+        if active:
+            # Devices leave quiescent mode on their own 15 min after the last START,
+            # so a missed STOP (stream lost, web UI closed mid-scan) cannot pause us for good.
+            self._bus_scan_expiry = asyncio.get_running_loop().call_later(
+                QUIESCENT_MODE_TIMEOUT_S, self._set_bus_scan, False
+            )
+        if active == self._bus_scan:
+            return
+        self._bus_scan = active
+        _LOGGER.info(
+            "Atios %s: DALI bus scan %s, DALI requests %s",
+            self._host,
+            "started" if active else "ended",
+            "paused" if active else "resumed",
+        )
+        _notify(self._bus_scan_cbs, active)
 
     @property
     def stream_lost(self) -> bool:
@@ -522,6 +566,7 @@ class AtiosHub:
         self._echo_pending_since = None
         self._monitor_backoff = RECONNECT_MIN
         self._set_stream_lost(False)
+        self._track_bus_scan(msg)
         frame = _monitor_frame(msg)
         if frame is None:
             return
@@ -530,6 +575,20 @@ class AtiosHub:
                 cb(frame)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Atios monitor listener failed")
+
+    def _track_bus_scan(self, msg: dict) -> None:
+        """Follow quiescent mode from any daliMonitor frame, the SmartCore's own included."""
+        data = msg.get("data")
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, list) or not isinstance(data.get("bits"), int):
+            return
+        try:
+            octets = [int(b) & 0xFF for b in payload]
+        except (TypeError, ValueError):
+            return
+        quiescent = decode_quiescent_command(octets, data["bits"])
+        if quiescent is not None:
+            self._set_bus_scan(quiescent)
 
     # ---- input monitor on the web UI socket (best-effort) -----------------
 
@@ -607,6 +666,11 @@ class AtiosHub:
         The HTTP timeout starts once it is this frame's turn.
         """
         async with self._dali_lock:
+            # Checked after waiting for the lock: a scan may have started meanwhile.
+            # Quiescent mode frames still go out, so a stuck scan can be ended.
+            if self._bus_scan and decode_quiescent_command(frame.data, frame.bits) is None:
+                _LOGGER.debug("Atios %s: bus scan running, %s not sent", self._host, frame.data)
+                return None
             return await self._send_frame_now(frame)
 
     async def _send_frame_now(self, frame: Frame) -> list[int] | None:
