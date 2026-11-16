@@ -1,4 +1,8 @@
-"""Sensor platform: DALI-2 light sensors (IEC 62386-304) and absolute inputs (-302).
+"""Sensor platform: DALI-2 light sensors (IEC 62386-304), absolute inputs (-302)
+and general purpose sensors (-306).
+
+General purpose instances (temperature, humidity, CO2, ...) report their
+measurement, scaled and with the unit from the SmartCore's NVRAM model.
 
 Absolute input instances (sliders, rotary switches) become position sensors in
 percent, read like the SmartCore firmware does (positions as 10-bit events, or
@@ -17,7 +21,11 @@ verified against real hardware (see CONTRIBUTING.md). The state is the raw
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
@@ -26,8 +34,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import AtiosConfigEntry
 from .const import DOMAIN
 from .dali import decode_input_event, position_percent
+from .general_purpose import Measurement
 from .hub import MonitorFrame
-from .nvram import INSTANCE_ABSOLUTE_INPUT, INSTANCE_LIGHT
+from .nvram import INSTANCE_ABSOLUTE_INPUT, INSTANCE_GENERAL_PURPOSE, INSTANCE_LIGHT
 
 
 async def async_setup_entry(
@@ -36,8 +45,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = entry.runtime_data
-    entities: list[AtiosLightLevelSensor | AtiosPositionSensor] = []
-    by_signature: dict[str, AtiosLightLevelSensor | AtiosPositionSensor] = {}
+    entities: list[_InstanceSensor] = []
+    by_signature: dict[str, _InstanceSensor] = {}
     for dev in hub.input_devices:
         for inst in dev.instances:
             sig = inst.expected_signature(dev.address)
@@ -53,6 +62,20 @@ async def async_setup_entry(
                     signature=sig,
                     label=f"{dev.name} position {inst.number}",
                     right_aligned=dev.sends_right_aligned_positions(inst),
+                )
+            elif inst.type == INSTANCE_GENERAL_PURPOSE and inst.resolution > 0:
+                measurement = Measurement(
+                    resolution=inst.resolution,
+                    magnitude=inst.magnitude,
+                    signed=inst.input_signal_signed,
+                    quantity_name=inst.quantity_name,
+                    unit_of_measure=inst.unit_of_measure,
+                )
+                entity = AtiosGeneralPurposeSensor(
+                    entry,
+                    signature=sig,
+                    label=f"{dev.name} {measurement.label} {inst.number}",
+                    measurement=measurement,
                 )
             else:
                 continue
@@ -123,3 +146,37 @@ class AtiosPositionSensor(SensorEntity):
         self._attr_extra_state_attributes = {"event_info": event_info}
         if self.hass is not None:
             self.async_write_ha_state()
+
+
+class AtiosGeneralPurposeSensor(SensorEntity):
+    """One DALI-2 general purpose sensor instance (IEC 62386-306)."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+
+    def __init__(
+        self, entry: AtiosConfigEntry, *, signature: str, label: str, measurement: Measurement
+    ) -> None:
+        self._measurement = measurement
+        self._attr_name = label
+        self._attr_unique_id = f"{entry.unique_id}_gp_{signature}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.unique_id)})
+        self._attr_native_unit_of_measurement = measurement.unit
+        if measurement.device_class is not None:
+            self._attr_device_class = SensorDeviceClass(measurement.device_class)
+        self._attr_suggested_display_precision = measurement.decimals
+        self._attr_native_value = None  # unknown until the first report
+
+    @callback
+    def handle_event_info(self, event_info: int) -> None:
+        value = self._measurement.decode_event(event_info)
+        if value is None:  # alarm events and MASK keep the last measurement
+            return
+        self._attr_native_value = value
+        self._attr_extra_state_attributes = {"event_info": event_info}
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+
+_InstanceSensor = AtiosLightLevelSensor | AtiosPositionSensor | AtiosGeneralPurposeSensor

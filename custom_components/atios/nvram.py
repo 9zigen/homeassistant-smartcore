@@ -65,6 +65,11 @@ class InputInstance:
     resolution: int = 0
     # Stored by the SmartCore for absolute instances of models that send 0..255
     position_right_aligned: bool | None = None
+    # General purpose sensor metadata (IEC 62386-306), read by the SmartCore at commissioning
+    magnitude: int = 127
+    input_signal_signed: bool = False
+    quantity_name: int = 0
+    unit_of_measure: int = 0
 
     def expected_signature(self, short_address: int) -> str | None:
         """The InputEvent.signature this instance's events decode to, if known.
@@ -145,6 +150,10 @@ def _parse_gtin(value: object) -> int | None:
     return gtin or None
 
 
+def _int(value: object, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
 def parse_input_devices(devices: list[dict]) -> list[InputDevice]:
     """Parse the ``input_devices`` list."""
     out: list[InputDevice] = []
@@ -164,6 +173,11 @@ def parse_input_devices(devices: list[dict]) -> list[InputDevice]:
                     if isinstance(i.get("position_right_aligned"), bool)
                     else None
                 ),
+                magnitude=_int(i.get("magnitude"), 127),
+                # -1: not read yet, treated as unsigned
+                input_signal_signed=i.get("input_signal_signed") == 1,
+                quantity_name=_int(i.get("quantity_name"), 0),
+                unit_of_measure=_int(i.get("unit_of_measure"), 0),
             )
             for i in (d.get("instances") or ())
         )

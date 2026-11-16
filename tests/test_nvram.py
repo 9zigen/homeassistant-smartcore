@@ -140,3 +140,26 @@ def test_missing_or_broken_gtin():
     for gtin in (None, [], "x", [0, 0, 0]):
         device = parse_input_devices([{"address": 2, "gtin": gtin, "instances": []}])[0]
         assert device.gtin is None
+
+
+def test_general_purpose_metadata():
+    (device,) = parse_input_devices(
+        [
+            {
+                "address": 4,
+                "instances": [
+                    {"number": 0, "type": 6, "active": True, "resolution": 10,
+                     "magnitude": 126, "input_signal_signed": 1,
+                     "quantity_name": 26, "unit_of_measure": 9},
+                    {"number": 1, "type": 6, "active": True, "resolution": 8,
+                     "input_signal_signed": -1},
+                ],
+            }
+        ]
+    )
+    temp, unread = device.instances
+    assert (temp.magnitude, temp.input_signal_signed, temp.quantity_name, temp.unit_of_measure) == (
+        126, True, 26, 9
+    )
+    # -1: the SmartCore has not read the metadata, defaults apply
+    assert (unread.magnitude, unread.input_signal_signed, unread.unit_of_measure) == (127, False, 0)

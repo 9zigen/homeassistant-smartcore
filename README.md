@@ -107,6 +107,7 @@ We plan to submit this integration to Home Assistant core in a bit.
 | Rotary encoders and absolute inputs | ✅ event entities (`rotate_right` / `rotate_left` / `rotate_stop`, with speed for Gira 202700 / Feller 40095) and position sensors (%) from NVRAM |
 | Occupancy sensors (62386-303) | ✅ entities from NVRAM, state from bus events |
 | Light sensors (62386-304) | ✅ entities from NVRAM, raw light level from bus events |
+| General purpose sensors (62386-306) | 🟨 entities from NVRAM, measurement with unit (temperature, humidity, CO2, ...) from bus events, not yet confirmed on hardware |
 | Zeroconf discovery | ✅ SmartCore found via `_atios._tcp` |
 | Firmware `update` entity | ✅ installed version from `/ota_status`; latest-version source still needed for update *notifications* |
 | Web-UI iframe panel | ✅ sidebar panel via options flow; probes for X-Frame-Options / CSP / mixed-content and warns |
