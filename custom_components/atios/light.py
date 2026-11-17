@@ -14,7 +14,13 @@ and group queries collide on the bus, so those stay optimistic).
 
 from __future__ import annotations
 
-from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_XY_COLOR,
+    ColorMode,
+    LightEntity,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
@@ -26,6 +32,9 @@ from .dali import (
     Target,
     TargetType,
     dali_level_to_ha_brightness,
+    dt8_activate,
+    dt8_set_colour_temperature,
+    dt8_set_xy,
     ha_brightness_to_dali,
     level,
     off,
@@ -33,6 +42,11 @@ from .dali import (
     goto_last_active,
 )
 from .hub import AtiosHub
+from .nvram import ControlDevice
+
+# Tc limits when a DT8 gear reports none (DALI default range 153..454 mireds)
+DEFAULT_MIN_KELVIN = 2000
+DEFAULT_MAX_KELVIN = 6500
 
 # Update and control the lights one at a time. Every poll is a QUERY ACTUAL
 # LEVEL that the SmartCore answers in its single web server task; the hub
@@ -51,7 +65,7 @@ async def async_setup_entry(
     if hub.control_devices:
         # named lights from the NVRAM device model (groups + short addresses)
         for dev in hub.control_devices:
-            entities.append(AtiosLight(hub, entry, dev.target, name=dev.name))
+            entities.append(AtiosLight(hub, entry, dev.target, name=dev.name, device=dev))
     else:
         # legacy fallback: per-address list from the options
         for addr in entry.options.get(CONF_LIGHTS, []):
@@ -75,9 +89,33 @@ class AtiosLight(LightEntity):
         entry: AtiosConfigEntry,
         target: Target,
         name: str | None = None,
+        device: ControlDevice | None = None,
     ) -> None:
         self._hub = hub
         self._target = target
+        self._device = device
+
+        # DT8 colour / tunable white, from the NVRAM colour capabilities
+        modes = {ColorMode.BRIGHTNESS}
+        if device is not None and device.supports_dt8:
+            if device.tc_capable:
+                modes.add(ColorMode.COLOR_TEMP)
+                warm = device.ct_warmest_mired
+                cool = device.ct_coolest_mired
+                self._attr_min_color_temp_kelvin = (
+                    round(1_000_000 / warm) if warm else DEFAULT_MIN_KELVIN
+                )
+                self._attr_max_color_temp_kelvin = (
+                    round(1_000_000 / cool) if cool else DEFAULT_MAX_KELVIN
+                )
+            if device.xy_capable:
+                modes.add(ColorMode.XY)
+        if len(modes) > 1:
+            modes.discard(ColorMode.BRIGHTNESS)  # HA: BRIGHTNESS never mixes
+        self._attr_supported_color_modes = modes
+        self._attr_color_mode = (
+            ColorMode.BRIGHTNESS if modes == {ColorMode.BRIGHTNESS} else next(iter(modes))
+        )
         self._attr_unique_id = f"{entry.unique_id}_{target.unique_suffix}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.unique_id)},
@@ -121,6 +159,27 @@ class AtiosLight(LightEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         self._raise_if_bus_scan()
+
+        # Set the temporary DT8 colour first; it becomes active with the DAPC
+        # level below, or with an explicit ACTIVATE when no brightness is given.
+        colour_set = False
+        modes = self._attr_supported_color_modes or set()
+        if ATTR_COLOR_TEMP_KELVIN in kwargs and ColorMode.COLOR_TEMP in modes:
+            kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
+            mireds = round(1_000_000 / max(1, kelvin))
+            for frame in dt8_set_colour_temperature(self._target, mireds):
+                await self._hub.send_frame(frame)
+            self._attr_color_temp_kelvin = kelvin
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            colour_set = True
+        elif ATTR_XY_COLOR in kwargs and ColorMode.XY in modes:
+            x, y = kwargs[ATTR_XY_COLOR]
+            for frame in dt8_set_xy(self._target, x, y):
+                await self._hub.send_frame(frame)
+            self._attr_xy_color = (x, y)
+            self._attr_color_mode = ColorMode.XY
+            colour_set = True
+
         if ATTR_BRIGHTNESS in kwargs:
             dali = ha_brightness_to_dali(kwargs[ATTR_BRIGHTNESS])
             await self._hub.send_frame(level(self._target, dali))
@@ -129,6 +188,10 @@ class AtiosLight(LightEntity):
             # Plain "on": restore the level the gear had before it was switched
             # off (GO TO LAST ACTIVE LEVEL), rather than forcing full brightness.
             await self._hub.send_frame(goto_last_active(self._target))
+            if colour_set:
+                # no DAPC was sent, so apply the temporary colour explicitly
+                for frame in dt8_activate(self._target):
+                    await self._hub.send_frame(frame)
             # Actual level is read back by async_update for single addresses;
             # optimistic only for broadcast/group.
             if self._target.type is not TargetType.SHORT and self._attr_brightness is None:

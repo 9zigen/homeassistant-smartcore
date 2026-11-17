@@ -166,6 +166,61 @@ def query_actual_level(target: Target) -> Frame:
     return query(target, OP_QUERY_ACTUAL_LEVEL)
 
 
+# ---- DT8 colour control (IEC 62386-209) -----------------------------------
+# App-extended commands only act after ENABLE DEVICE TYPE 8 (special command
+# 0xC1), which must directly precede *each* one. 16-bit values travel via
+# DTR0 (LSB) / DTR1 (MSB), set with the special commands 0xA3 / 0xC3. A set
+# temporary colour becomes active on ACTIVATE (0xE2) or on the next arc power
+# (DAPC) command.
+
+SPECIAL_DTR0 = 0xA3
+SPECIAL_DTR1 = 0xC3
+SPECIAL_ENABLE_DEVICE_TYPE = 0xC1
+DEVICE_TYPE_COLOUR = 8
+
+OP_DT8_SET_TEMP_X = 0xE0
+OP_DT8_SET_TEMP_Y = 0xE1
+OP_DT8_ACTIVATE = 0xE2
+OP_DT8_SET_TEMP_COLOUR_TEMPERATURE = 0xE7
+
+
+def _dtr16(value: int) -> list[Frame]:
+    """Load a 16-bit value into DTR0 (LSB) and DTR1 (MSB)."""
+    return [
+        Frame(data=[SPECIAL_DTR0, value & 0xFF]),
+        Frame(data=[SPECIAL_DTR1, (value >> 8) & 0xFF]),
+    ]
+
+
+def _dt8_command(target: Target, opcode: int) -> list[Frame]:
+    """ENABLE DEVICE TYPE 8 immediately followed by one DT8 command."""
+    return [
+        Frame(data=[SPECIAL_ENABLE_DEVICE_TYPE, DEVICE_TYPE_COLOUR]),
+        command(target, opcode),
+    ]
+
+
+def dt8_set_colour_temperature(target: Target, mireds: int) -> list[Frame]:
+    """Set the temporary colour temperature Tc (mireds); activate separately."""
+    if not 1 <= mireds <= 0xFFFE:
+        raise ValueError(f"mireds out of range: {mireds}")
+    return _dtr16(mireds) + _dt8_command(target, OP_DT8_SET_TEMP_COLOUR_TEMPERATURE)
+
+
+def dt8_set_xy(target: Target, x: float, y: float) -> list[Frame]:
+    """Set the temporary CIE xy chromaticity (0..1 each); activate separately."""
+    frames: list[Frame] = []
+    for value, opcode in ((x, OP_DT8_SET_TEMP_X), (y, OP_DT8_SET_TEMP_Y)):
+        raw = max(0, min(0xFFFF, round(float(value) * 65535)))
+        frames += _dtr16(raw) + _dt8_command(target, opcode)
+    return frames
+
+
+def dt8_activate(target: Target) -> list[Frame]:
+    """Apply the temporary colour (used when no DAPC level follows)."""
+    return _dt8_command(target, OP_DT8_ACTIVATE)
+
+
 # ---- percentage <-> DALI level -------------------------------------------
 # HA brightness is 0..255; DALI arc power is 0..254. This is a linear map, NOT
 # the DALI logarithmic dim curve — fixtures apply their own curve on top, so a

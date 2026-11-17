@@ -48,10 +48,21 @@ class ControlDevice:
     device_type_selected: int = 0
     min_level: int = 1
     max_level: int = 254
+    # DT8 colour capabilities (QUERY COLOUR TYPE FEATURES, IEC 62386-209):
+    # bit 0 = xy-coordinate capable, bit 1 = colour temperature Tc capable
+    xy_capable: bool = False
+    tc_capable: bool = False
+    # Tc limits in mireds (physical warmest/coolest); None when not reported
+    ct_warmest_mired: int | None = None
+    ct_coolest_mired: int | None = None
 
     @property
     def target(self) -> Target:
         return Target.group(self.number) if self.is_group else Target.short(self.number)
+
+    @property
+    def supports_dt8(self) -> bool:
+        return 8 in self.device_types or self.device_type_selected == 8
 
 
 @dataclass(frozen=True)
@@ -132,9 +143,26 @@ def parse_control_devices(devices: list[dict]) -> list[ControlDevice]:
                 device_type_selected=d.get("device_type_selected", 0),
                 min_level=d.get("min_level", 1),
                 max_level=d.get("max_level", 254),
+                xy_capable=bool(_int(d.get("color_type_features"), 0) & 0b01),
+                tc_capable=bool(_int(d.get("color_type_features"), 0) & 0b10),
+                ct_warmest_mired=_mired(
+                    d.get("color_temperature_physical_warmest")
+                    or d.get("color_temperature_warmest")
+                ),
+                ct_coolest_mired=_mired(
+                    d.get("color_temperature_physical_coolest")
+                    or d.get("color_temperature_coolest")
+                ),
             )
         )
     return out
+
+
+def _mired(value: object) -> int | None:
+    """A plausible Tc limit in mireds, else None (0/0xFFFF mean 'not reported')."""
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 0xFFFE:
+        return value
+    return None
 
 
 def _parse_gtin(value: object) -> int | None:
