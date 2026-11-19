@@ -100,8 +100,10 @@ We plan to submit this integration to Home Assistant core in a bit.
 | NVRAM device model (`nvram.py`) | ✅ reads `/api/dali/nvm` (control + input devices, paginated); parser verified against captured fixtures |
 | Named lights from NVRAM | ✅ every configured short address and group becomes a named light; legacy options list as fallback |
 | QUERY status read | ✅ `daliAnswer` on the socket and the HTTP answer shape confirmed on device |
-| Light state without polling (`gear_state.py`) | 🟨 one QUERY ACTUAL LEVEL per gear at start and after a reconnect, then the state follows the bus like the SmartCore firmware (arc power, OFF, RECALL, UP/DOWN, STEP, NVRAM scenes, groups) |
+| Light state without polling (`gear_state.py`) | ✅ one QUERY ACTUAL LEVEL per gear at start and after a reconnect, then the state follows the bus like the SmartCore firmware (arc power, OFF, RECALL, UP/DOWN, STEP, NVRAM scenes, groups) |
 | `send_dali_frame` / `recall_scene` services | ✅ |
+| Reload DALI devices button | 🟨 re-reads the NVRAM device model after changes in the DALI configurator |
+| DALI control / input device counts | 🟨 diagnostic sensors, device list as attributes |
 | DALI-2 event decode (`dali.py`) | ✅ 62386-103/-301, verified byte-for-byte vs python-dali on 585 frames |
 | Button events (`event.py`) | ✅ pre-created from the NVRAM model with configured names; unknown buttons still auto-appear on first press |
 | Built-in inputs on `ws://<host>/ws` (`inputs.py`) | ✅ input monitor edges, lease renewed every 10 s; DALI stays on the DALI IP Interface socket; needs firmware 3.2.64+ |
