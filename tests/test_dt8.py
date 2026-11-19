@@ -58,9 +58,12 @@ def test_set_xy():
 
 
 def test_set_xy_clamps():
+    # upper clamp is 0xFFFE: 0xFFFF is MASK in DT8 and would be ignored
     frames = dt8_set_xy(Target.short(0), -0.5, 1.5)
     assert _bytes(frames)[0:2] == [(0xA3, 0x00), (0xC3, 0x00)]
-    assert _bytes(frames)[4:6] == [(0xA3, 0xFF), (0xC3, 0xFF)]
+    assert _bytes(frames)[4:6] == [(0xA3, 0xFE), (0xC3, 0xFF)]
+    frames = dt8_set_xy(Target.short(0), 1.0, 1.0)
+    assert _bytes(frames)[0:2] == [(0xA3, 0xFE), (0xC3, 0xFF)]
 
 
 def test_activate():

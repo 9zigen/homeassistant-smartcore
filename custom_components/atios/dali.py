@@ -211,7 +211,8 @@ def dt8_set_xy(target: Target, x: float, y: float) -> list[Frame]:
     """Set the temporary CIE xy chromaticity (0..1 each); activate separately."""
     frames: list[Frame] = []
     for value, opcode in ((x, OP_DT8_SET_TEMP_X), (y, OP_DT8_SET_TEMP_Y)):
-        raw = max(0, min(0xFFFF, round(float(value) * 65535)))
+        # 0xFFFF is MASK in DT8 (gear ignores it), so the scale tops out at 0xFFFE
+        raw = max(0, min(0xFFFE, round(float(value) * 65535)))
         frames += _dtr16(raw) + _dt8_command(target, opcode)
     return frames
 
