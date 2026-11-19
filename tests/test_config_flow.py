@@ -81,6 +81,7 @@ async def test_user_flow_strips_whitespace(hass):
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "SmartCore (192.168.1.154)"
+    assert result["data"] == {CONF_HOST: "192.168.1.154", CONF_LINE: 1}
 
 
 async def test_user_flow_cannot_connect_then_recover(hass):
