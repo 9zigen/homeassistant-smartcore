@@ -64,6 +64,14 @@ ISSUE_DALI_IP_LOST = "dali_ip_stream_lost"
 # issue raised under the old key does not stay behind after the update
 LEGACY_ISSUE_KEYS = ("lunatone_socket_silent", "lunatone_stream_lost")
 
+# A query sent as daliFrame on the DALI IP Interface socket is answered with
+# daliAnswer within about 110 ms (no answer included, measured on 3.2.18). The
+# firmware sends nothing on a collision or a busy bus, nor once another client
+# has taken the socket over: then the frame goes over HTTP instead, and after
+# this many such silences in a row the socket is no longer used until it reconnects.
+DALI_IP_ANSWER_TIMEOUT_S = 0.25
+DALI_IP_SILENT_ANSWERS = 2
+
 # Lights turn unavailable after this many DALI requests in a row failed to reach
 # the SmartCore (connection refused, timeout, HTTP error), and back on the next success.
 UNAVAILABLE_AFTER_FAILURES = 3

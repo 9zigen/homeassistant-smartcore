@@ -75,7 +75,7 @@ standalone or alongside a Matter-paired SmartCore.
    While the SmartCore (or another DALI master) scans the bus, it holds the
    DALI-2 devices in quiescent mode. The integration follows that from the
    same stream: the diagnostic **DALI bus scan** binary sensor turns on, light
-   polling pauses and light commands fail with a clear error until the scan
+   queries pause and light commands fail with a clear error until the scan
    has finished, so Home Assistant does not disturb addressing.
 
 7. **Built-in inputs (optional, newer firmware 3.2.64+):** SmartCore firmware with
@@ -95,11 +95,12 @@ We plan to submit this integration to Home Assistant core in a bit.
 | Piece | State |
 |---|---|
 | DALI frame encode/decode (`dali.py`) | ✅ verified against reference frames (`FF 10` goto-scene, `01 91` query-gear-present) |
-| Transport (`hub.py`) | ✅ native aiohttp; HTTP `/api/dali/iface` confirmed on device; `daliMonitor` stream on `ws://<host>/` (needs **DALI IP Interface** on) |
+| Transport (`hub.py`) | ✅ native aiohttp; DALI frames as `daliFrame` on the DALI IP Interface socket `ws://<host>/`, HTTP `/api/dali/iface` as fallback; `daliMonitor` stream on the same socket (needs **DALI IP Interface** on) |
 | Broadcast light + brightness/on/off | ✅ |
 | NVRAM device model (`nvram.py`) | ✅ reads `/api/dali/nvm` (control + input devices, paginated); parser verified against captured fixtures |
 | Named lights from NVRAM | ✅ every configured short address and group becomes a named light; legacy options list as fallback |
-| QUERY status read | ✅ HTTP answer shape confirmed on device (`{success,bus_busy,collision_detected,data}`) |
+| QUERY status read | ✅ `daliAnswer` on the socket and the HTTP answer shape confirmed on device |
+| Light state without polling (`gear_state.py`) | 🟨 one QUERY ACTUAL LEVEL per gear at start and after a reconnect, then the state follows the bus like the SmartCore firmware (arc power, OFF, RECALL, UP/DOWN, STEP, NVRAM scenes, groups) |
 | `send_dali_frame` / `recall_scene` services | ✅ |
 | DALI-2 event decode (`dali.py`) | ✅ 62386-103/-301, verified byte-for-byte vs python-dali on 585 frames |
 | Button events (`event.py`) | ✅ pre-created from the NVRAM model with configured names; unknown buttons still auto-appear on first press |

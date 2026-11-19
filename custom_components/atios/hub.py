@@ -10,9 +10,11 @@ Transport is native aiohttp — no external DALI library. The SmartCore exposes:
     Confirmed on fw 2.7.9: on connect it greets with ``{"type":"info"}``
     reporting name "dali-iot", protocolVersion 3.0.
 
-Lights and status use the HTTP path (verified on device). The websocket is used
-only to *receive* monitor frames for buttons; it is best-effort — if it can't be
-reached, lights are unaffected and it retries quietly.
+DALI frames go over the DALI IP Interface websocket as ``daliFrame`` while it is
+connected and greeted us (queries are answered with ``daliAnswer``, confirmed on
+3.2.18), and over the HTTP endpoint otherwise, so lights keep working without
+the socket. Every bus frame on the socket, our own included, is handed to the
+bus listeners, which keep the light state current (gear_state.py).
 
 What the firmware requires for that stream (checked against the SmartCore
 firmware source, lib-dali ``dali_transport_layer.c`` / ``dali_ip_websocket.c``):
@@ -56,9 +58,11 @@ from dataclasses import dataclass
 import aiohttp
 
 from .const import (
+    DALI_IP_ANSWER_TIMEOUT_S,
     DALI_IP_ECHO_CHECK_S,
     DALI_IP_ECHO_TIMEOUT_S,
     DALI_IP_GREETING_TIMEOUT_S,
+    DALI_IP_SILENT_ANSWERS,
     RECONNECT_MAX,
     RECONNECT_MIN,
     UNAVAILABLE_AFTER_FAILURES,
@@ -86,6 +90,8 @@ class MonitorFrame:
     # socket's message counter (consecutive per connection, a gap means lost messages)
     device_timestamp: float | None = None
     counter: int | None = None
+    # False for the SmartCore's own output (our frames, its own commands)
+    external: bool = True
 
 
 def _parse_ws_json(raw: str) -> dict | None:
@@ -106,7 +112,7 @@ def _parse_ws_json(raw: str) -> dict | None:
     return msg if isinstance(msg, dict) else None
 
 
-def _monitor_frame(msg: dict) -> MonitorFrame | None:
+def _monitor_frame(msg: dict, *, own: bool = False) -> MonitorFrame | None:
     """Extract an inbound MonitorFrame from a daliMonitor message.
 
     Confirmed on fw 2.7.9, the SmartCore pushes each observed bus frame as::
@@ -117,7 +123,8 @@ def _monitor_frame(msg: dict) -> MonitorFrame | None:
     ``externalSource`` is true for traffic that originated on the bus (input
     devices, gear answers) and false for the SmartCore's own output (our
     commands, and the arc-power frames it sends itself when a coupler is bound
-    to a light). Only external frames are input-event candidates.
+    to a light). Only external frames are input-event candidates; ``own``
+    returns the SmartCore's own frames as well.
     """
     if msg.get("type") != "daliMonitor":
         return None
@@ -127,7 +134,8 @@ def _monitor_frame(msg: dict) -> MonitorFrame | None:
     payload = data.get("data")
     if not isinstance(payload, list) or not payload:
         return None
-    if not data.get("externalSource"):
+    external = bool(data.get("externalSource"))
+    if not external and not own:
         return None  # our own outgoing frame, not something on the bus
     try:
         octets = [int(b) & 0xFF for b in payload]
@@ -144,6 +152,7 @@ def _monitor_frame(msg: dict) -> MonitorFrame | None:
         framing_error=bool(data.get("framingError")),
         device_timestamp=float(timestamp) if isinstance(timestamp, (int, float)) else None,
         counter=counter if isinstance(counter, int) else None,
+        external=external,
     )
 
 
@@ -183,6 +192,16 @@ class AtiosHub:
         self._closing = False
         self._ws_warned = False
         self._monitor_cbs: list[Callable[[MonitorFrame], None]] = []
+        # Every frame on the bus, ours included (light state mirror)
+        self._bus_cbs: list[Callable[[MonitorFrame], None]] = []
+        # Called on every connection the device greets, to read the state again
+        self._connected_cbs: list[Callable[[], None]] = []
+        # The DALI IP Interface socket, while connected
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        # Query waiting for its daliAnswer: the query bytes and the future for the answer
+        self._pending_answer: tuple[list[int], asyncio.Future] | None = None
+        # Frames that got no reply on the socket in a row, see DALI_IP_SILENT_ANSWERS
+        self._ws_silent = 0
         self._ip_interface: bool | None = None
         self._ip_interface_cbs: list[Callable[[bool], None]] = []
         self._greeted = False  # DALI IP Interface JSON seen on the current connection
@@ -377,6 +396,44 @@ class AtiosHub:
         self._monitor_cbs.append(cb)
         return lambda: self._monitor_cbs.remove(cb)
 
+    def add_bus_listener(self, cb: Callable[[MonitorFrame], None]) -> Callable[[], None]:
+        """Call ``cb(frame)`` for every frame on the bus, the SmartCore's own included.
+
+        Without a live daliMonitor stream, frames we send are handed over right
+        after sending, so the light state still follows our own commands.
+        """
+        self._bus_cbs.append(cb)
+        return lambda: self._bus_cbs.remove(cb)
+
+    def add_connected_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
+        """Call ``cb()`` each time the DALI IP Interface socket (re)connects and is greeted."""
+        self._connected_cbs.append(cb)
+        return lambda: self._connected_cbs.remove(cb)
+
+    @property
+    def bus_stream_live(self) -> bool:
+        """daliMonitor frames are arriving: all bus traffic, ours included, is seen."""
+        return (
+            self._ws is not None
+            and self._greeted
+            and self._ip_interface is True
+            and not self._stream_lost
+        )
+
+    @property
+    def dali_ip_connected(self) -> bool:
+        """The DALI IP Interface socket is connected and the device greeted us on it."""
+        return self._ws is not None and self._greeted
+
+    @property
+    def _ws_usable(self) -> bool:
+        return (
+            self._ws is not None
+            and not self._ws.closed
+            and self._greeted
+            and self._ws_silent < DALI_IP_SILENT_ANSWERS
+        )
+
     def add_builtin_input_listener(self, cb: Callable[[int, int], None]) -> Callable[[], None]:
         """Call ``cb(pin, level)`` on every built-in input edge (pin 0 = input 1, raw level)."""
         self._builtin_input_cbs.append(cb)
@@ -476,6 +533,8 @@ class AtiosHub:
                     self._ws_url, heartbeat=30, timeout=aiohttp.ClientTimeout(total=10)
                 ) as ws:
                     self._ws_warned = False
+                    self._ws = ws
+                    self._ws_silent = 0
                     _LOGGER.info("Atios %s: monitor websocket connected", self._host)
                     self._greeted = False
                     self._echo_pending_since = None
@@ -507,6 +566,9 @@ class AtiosHub:
                 else:
                     _LOGGER.debug("Atios %s: ws retry (%s)", self._host, err)
             finally:
+                self._ws = None
+                self._greeted = False
+                self._fail_pending_answer()
                 for task in (watchdog, echo_watchdog):
                     if task is not None:
                         task.cancel()
@@ -555,8 +617,18 @@ class AtiosHub:
             return
         # Any DALI IP Interface message (the "info" greeting first) shows the device has
         # registered us as its client and will stream to us.
+        first = not self._greeted
         self._greeted = True
         self._set_stream_ok(True)
+        if first:
+            for cb in list(self._connected_cbs):
+                try:
+                    cb()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Atios connected listener failed")
+        if msg.get("type") == "daliAnswer":
+            self._resolve_answer(msg.get("data"))
+            return
         if msg.get("type") != "daliMonitor":
             return
         # The device sends no daliMonitor at all while "DALI IP Interface" is
@@ -567,14 +639,40 @@ class AtiosHub:
         self._monitor_backoff = RECONNECT_MIN
         self._set_stream_lost(False)
         self._track_bus_scan(msg)
-        frame = _monitor_frame(msg)
+        frame = _monitor_frame(msg, own=True)
         if frame is None:
+            return
+        self._dispatch_bus(frame)
+        if not frame.external:
             return
         for cb in list(self._monitor_cbs):
             try:
                 cb(frame)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Atios monitor listener failed")
+
+    def _dispatch_bus(self, frame: MonitorFrame) -> None:
+        for cb in list(self._bus_cbs):
+            try:
+                cb(frame)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Atios bus listener failed")
+
+    def _resolve_answer(self, data: object) -> None:
+        """Hand a daliAnswer to the query waiting for it (matched by the query bytes)."""
+        pending = self._pending_answer
+        if pending is None or not isinstance(data, dict):
+            return
+        query, future = pending
+        if data.get("queryData") != query or future.done():
+            return
+        answer = data.get("daliData")
+        future.set_result([answer & 0xFF] if data.get("result") == 8 and isinstance(answer, int) else None)
+
+    def _fail_pending_answer(self) -> None:
+        if self._pending_answer is not None and not self._pending_answer[1].done():
+            self._pending_answer[1].set_exception(ConnectionError("DALI IP Interface socket closed"))
+        self._pending_answer = None
 
     def _track_bus_scan(self, msg: dict) -> None:
         """Follow quiescent mode from any daliMonitor frame, the SmartCore's own included."""
@@ -657,13 +755,13 @@ class AtiosHub:
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Atios built-in input listener failed")
 
-    # ---- sending / querying (HTTP, confirmed) -----------------------------
+    # ---- sending / querying -------------------------------------------------
 
     async def send_frame(self, frame: Frame) -> list[int] | None:
-        """Send a DALI frame over the confirmed HTTP endpoint, one request at a time.
+        """Send a DALI frame, one request at a time.
 
+        Over the DALI IP Interface socket while it is usable, else over HTTP.
         Returns the answer byte(s) as list[int] for QUERY frames, else None.
-        The HTTP timeout starts once it is this frame's turn.
         """
         async with self._dali_lock:
             # Checked after waiting for the lock: a scan may have started meanwhile.
@@ -671,7 +769,67 @@ class AtiosHub:
             if self._bus_scan and decode_quiescent_command(frame.data, frame.bits) is None:
                 _LOGGER.debug("Atios %s: bus scan running, %s not sent", self._host, frame.data)
                 return None
-            return await self._send_frame_now(frame)
+            stream_live = self.bus_stream_live
+            if self._ws_usable:
+                sent, answer = await self._send_frame_ws(frame)
+                if sent:
+                    self._after_send(frame, stream_live)
+                    return answer
+            answer = await self._send_frame_now(frame)
+            if self._send_failures == 0:
+                self._after_send(frame, stream_live)
+            return answer
+
+    def _after_send(self, frame: Frame, stream_live: bool) -> None:
+        """Without a daliMonitor stream, our own commands are the only bus traffic we see."""
+        if stream_live or frame.wait_for_answer:
+            return
+        self._dispatch_bus(MonitorFrame(data=list(frame.data), bits=frame.bits, external=False))
+
+    async def _send_frame_ws(self, frame: Frame) -> tuple[bool, list[int] | None]:
+        """Send a frame as daliFrame; (sent, answer). Not sent: use HTTP instead."""
+        ws = self._ws
+        if ws is None:
+            return False, None
+        message = {
+            "type": "daliFrame",
+            "data": {
+                "line": self._line,
+                "numberOfBits": frame.bits,
+                "daliData": list(frame.data),
+                "mode": {
+                    "priority": frame.priority,
+                    "sendTwice": frame.send_twice,
+                    "waitForAnswer": frame.wait_for_answer,
+                },
+            },
+        }
+        future: asyncio.Future | None = None
+        if frame.wait_for_answer:
+            future = asyncio.get_running_loop().create_future()
+            self._pending_answer = (list(frame.data), future)
+        try:
+            await ws.send_str(json.dumps(message))
+            if future is None:
+                # Commands get no reply of their own on the socket
+                self._ws_silent = 0
+                self._record_send(True)
+                return True, None
+            answer = await asyncio.wait_for(future, DALI_IP_ANSWER_TIMEOUT_S)
+        except (asyncio.TimeoutError, aiohttp.ClientError, RuntimeError, ConnectionError):
+            self._ws_silent += 1
+            _LOGGER.debug(
+                "Atios %s: no reply on the DALI IP Interface socket for %s, using HTTP",
+                self._host,
+                frame.data,
+            )
+            return False, None
+        finally:
+            if future is not None:
+                self._pending_answer = None
+        self._ws_silent = 0
+        self._record_send(True)
+        return True, answer
 
     async def _send_frame_now(self, frame: Frame) -> list[int] | None:
         payload = {
