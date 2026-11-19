@@ -26,7 +26,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -45,6 +45,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = entry.runtime_data
+    async_add_entities(
+        [
+            AtiosDeviceCountSensor(entry, "control"),
+            AtiosDeviceCountSensor(entry, "input"),
+        ]
+    )
     entities: list[_InstanceSensor] = []
     by_signature: dict[str, _InstanceSensor] = {}
     for dev in hub.input_devices:
@@ -177,6 +183,39 @@ class AtiosGeneralPurposeSensor(SensorEntity):
         self._attr_extra_state_attributes = {"event_info": event_info}
         if self.hass is not None:
             self.async_write_ha_state()
+
+
+
+class AtiosDeviceCountSensor(SensorEntity):
+    """How many DALI control or input devices were loaded from the SmartCore's NVRAM."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+
+    def __init__(self, entry: AtiosConfigEntry, kind: str) -> None:
+        hub = entry.runtime_data
+        self._attr_unique_id = f"{entry.unique_id}_{kind}_devices"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.unique_id)})
+        if kind == "control":
+            self._attr_name = "DALI control devices"
+            self._attr_icon = "mdi:lightbulb-group"
+            gear = [d for d in hub.control_devices if not d.is_group]
+            groups = [d for d in hub.control_devices if d.is_group]
+            self._attr_native_value = len(gear) if hub.nvm_loaded else None
+            self._attr_extra_state_attributes = {
+                "groups": len(groups),
+                "devices": [f"A{d.number} {d.name}" for d in gear],
+            }
+        else:
+            self._attr_name = "DALI input devices"
+            self._attr_icon = "mdi:gesture-tap-button"
+            self._attr_native_value = len(hub.input_devices) if hub.nvm_loaded else None
+            self._attr_extra_state_attributes = {
+                "instances": sum(len(d.instances) for d in hub.input_devices),
+                "devices": [f"A{d.address} {d.name}" for d in hub.input_devices],
+            }
 
 
 _InstanceSensor = AtiosLightLevelSensor | AtiosPositionSensor | AtiosGeneralPurposeSensor

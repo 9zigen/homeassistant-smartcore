@@ -222,6 +222,7 @@ class AtiosHub:
         self._info: dict = {}
         self.control_devices: list = []  # nvram.ControlDevice, set at setup
         self.input_devices: list = []  # nvram.InputDevice, set at setup
+        self.nvm_loaded = False  # the NVRAM device model was read at setup
 
     @property
     def host(self) -> str:
