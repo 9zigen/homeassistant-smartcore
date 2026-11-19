@@ -59,7 +59,8 @@ class AtiosConfigFlow(ConfigFlow, domain=DOMAIN):
             hub = AtiosHub(host, user_input[CONF_LINE], session)
             if await hub.async_test_connection():
                 return self.async_create_entry(
-                    title=f"SmartCore ({host})", data=user_input
+                    title=f"SmartCore ({host})",
+                    data={**user_input, CONF_HOST: host},
                 )
             errors["base"] = "cannot_connect"
 
