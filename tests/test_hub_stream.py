@@ -32,6 +32,11 @@ class FakeSmartCore:
         self.iface_status = 200
         self.iface_frames: list[list[int]] = []
         self.iface_body = {"success": True, "bus_busy": False, "collision_detected": False, "data": 200}
+        # daliFrame messages received on the DALI IP Interface socket
+        self.ws_frames: list[list[int]] = []
+        # Answer for queries on the socket (None: no answer), or stay silent like a taken over socket
+        self.ws_answers = False
+        self.ws_answer: int | None = 200
         self.app = web.Application()
         self.app.router.add_get("/", self._dali_ip)
         self.app.router.add_get("/ws", self._ui)
@@ -45,8 +50,17 @@ class FakeSmartCore:
         self.handshakes += 1
         self.dali_ip.append(ws)
         await ws.send_str(json.dumps({"type": "info"}))
-        async for _msg in ws:
-            pass
+        async for msg in ws:
+            frame = json.loads(msg.data)
+            if frame.get("type") != "daliFrame":
+                continue
+            data = frame["data"]
+            self.ws_frames.append(data["daliData"])
+            if data["mode"]["waitForAnswer"] and self.ws_answers:
+                answer = {"line": 0, "result": 0, "queryData": data["daliData"], "queryBits": 16}
+                if self.ws_answer is not None:
+                    answer.update(result=8, daliData=self.ws_answer)
+                await ws.send_str(json.dumps({"type": "daliAnswer", "data": answer}))
         return ws
 
     async def _ui(self, request):
@@ -94,6 +108,7 @@ async def device(monkeypatch):
     monkeypatch.setattr(hub_module, "DALI_IP_ECHO_TIMEOUT_S", 0.3)
     monkeypatch.setattr(hub_module, "DALI_IP_ECHO_CHECK_S", 0.05)
     monkeypatch.setattr(hub_module, "RECONNECT_MIN", 0.05)
+    monkeypatch.setattr(hub_module, "DALI_IP_ANSWER_TIMEOUT_S", 0.1)
     fake = FakeSmartCore()
     server = TestServer(fake.app)
     await server.start_server()
@@ -188,12 +203,12 @@ async def test_a_bus_scan_pauses_dali_requests(device):
     await _until(lambda: hub.bus_scan_active)
     assert await hub.send_frame(QUERY) is None
     await hub.send_frame(dali.off(dali.Target.short(3)))
-    assert fake.iface_frames == []
+    assert fake.iface_frames == fake.ws_frames == []
 
     # quiescent mode frames still go out, so a stuck scan can be ended
     stop = dali.Frame(data=[0xFF, 0xFE, 0x1E], bits=24)
     await hub.send_frame(stop)
-    assert fake.iface_frames == [[0xFF, 0xFE, 0x1E]]
+    await _until(lambda: fake.ws_frames == [[0xFF, 0xFE, 0x1E]])
 
     await fake.echo([0xFF, 0xFE, 0x1E])
     await _until(lambda: not hub.bus_scan_active)
@@ -207,3 +222,68 @@ async def test_a_bus_scan_ends_by_itself_without_stop(device, monkeypatch):
     await fake.echo([0xFF, 0xFE, 0x1D])
     await _until(lambda: hub.bus_scan_active)
     await _until(lambda: not hub.bus_scan_active)
+
+
+# ---- DALI frames over the DALI IP Interface socket -----------------------
+
+
+async def test_queries_are_answered_on_the_socket(device):
+    fake, hub = device
+    fake.ws_answers = True
+    fake.ws_answer = 42
+    assert await hub.send_frame(QUERY) == [42]
+    fake.ws_answer = None
+    assert await hub.send_frame(QUERY) is None  # gear did not answer
+    assert fake.iface_frames == []
+    assert fake.ws_frames == [[7, 160], [7, 160]]
+
+
+async def test_commands_go_over_the_socket(device):
+    fake, hub = device
+    await hub.send_frame(dali.off(dali.Target.short(3)))
+    await _until(lambda: fake.ws_frames)
+    assert fake.ws_frames == [[7, 0]]
+    assert fake.iface_frames == []
+
+
+async def test_a_silent_socket_falls_back_to_http(device):
+    fake, hub = device  # the socket never answers, like one taken over by another client
+    assert await hub.send_frame(QUERY) == [200]
+    assert await hub.send_frame(QUERY) == [200]
+    assert fake.iface_frames == [[7, 160], [7, 160]]
+    # after two silences in a row everything goes over HTTP until the socket reconnects
+    await hub.send_frame(dali.off(dali.Target.short(3)))
+    assert fake.iface_frames[-1] == [7, 0]
+    assert len(fake.ws_frames) == 2
+
+
+async def test_bus_listeners_see_our_own_frames(device):
+    fake, hub = device
+    frames = []
+    hub.add_bus_listener(frames.append)
+    events = []
+    hub.add_monitor_listener(events.append)
+    await fake.echo([7, 0])
+    await _until(lambda: frames)
+    assert frames[0].data == [7, 0] and not frames[0].external
+    assert events == []  # input event listeners only get external frames
+
+
+async def test_without_a_stream_our_commands_reach_the_bus_listeners(device):
+    fake, hub = device
+    frames = []
+    hub.add_bus_listener(frames.append)
+    hub._set_ip_interface(False)  # no daliMonitor stream: the frame would never come back
+    await hub.send_frame(dali.off(dali.Target.short(3)))
+    assert [f.data for f in frames] == [[7, 0]]
+    await hub.send_frame(QUERY)  # queries are not light commands
+    assert len(frames) == 1
+
+
+async def test_a_reconnect_is_reported(device):
+    fake, hub = device
+    connected = []
+    hub.add_connected_listener(lambda: connected.append(True))
+    await fake.dali_ip[0].close()
+    await _until(lambda: connected)
+    assert hub.dali_ip_connected
