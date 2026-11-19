@@ -48,6 +48,10 @@ class ControlDevice:
     device_type_selected: int = 0
     min_level: int = 1
     max_level: int = 254
+    physical_minimum: int = 1
+    fade_rate: int = 7
+    # Scene number -> level (255: not in the scene), for enabled scenes only
+    scenes: dict[int, int] = field(default_factory=dict)
     # DT8 colour capabilities (QUERY COLOUR TYPE FEATURES, IEC 62386-209):
     # bit 0 = xy-coordinate capable, bit 1 = colour temperature Tc capable
     xy_capable: bool = False
@@ -143,6 +147,9 @@ def parse_control_devices(devices: list[dict]) -> list[ControlDevice]:
                 device_type_selected=d.get("device_type_selected", 0),
                 min_level=d.get("min_level", 1),
                 max_level=d.get("max_level", 254),
+                physical_minimum=_int(d.get("physical_minimum"), 1),
+                fade_rate=_int(d.get("fade_rate"), 7),
+                scenes=_scenes(d.get("gear_scenes")),
                 xy_capable=bool(_int(d.get("color_type_features"), 0) & 0b01),
                 tc_capable=bool(_int(d.get("color_type_features"), 0) & 0b10),
                 ct_warmest_mired=_mired(
@@ -156,6 +163,18 @@ def parse_control_devices(devices: list[dict]) -> list[ControlDevice]:
             )
         )
     return out
+
+
+def _scenes(value: object) -> dict[int, int]:
+    """Levels of the enabled scenes from the NVRAM ``gear_scenes`` list."""
+    scenes: dict[int, int] = {}
+    for scene in value if isinstance(value, list) else ():
+        if not isinstance(scene, dict) or not scene.get("enabled"):
+            continue
+        number, level = scene.get("number"), scene.get("level")
+        if isinstance(number, int) and 0 <= number <= 15 and isinstance(level, int) and 0 <= level <= 255:
+            scenes[number] = level
+    return scenes
 
 
 def _mired(value: object) -> int | None:
