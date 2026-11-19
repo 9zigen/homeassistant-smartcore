@@ -33,6 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.EVENT,
     Platform.LIGHT,
     Platform.SENSOR,
@@ -78,6 +79,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AtiosConfigEntry) -> boo
         hub.control_devices = parse_control_devices(raw_control)
     if raw_inputs is not None:
         hub.input_devices = parse_input_devices(raw_inputs)
+    hub.nvm_loaded = raw_control is not None and raw_inputs is not None
 
     await hub.async_start()
     entry.runtime_data = hub
